@@ -1,6 +1,8 @@
 .PHONY: install run test test-client lint \
         docker-build-onnx docker-run-onnx \
-        docker-build-openvino docker-build-tensorrt \
+        docker-build-openvino \
+        docker-build-tensorrt docker-rebuild-tensorrt \
+        docker-run-tensorrt docker-shell-tensorrt docker-test-tensorrt \
         install-openvino
 
 CONFIG ?= config/config.yaml
@@ -57,9 +59,44 @@ docker-build-openvino:
 	  -t $(IMAGE_OPENVINO) \
 	  .
 
-# TensorRT backend (Phase 2)
+# TensorRT backend
 docker-build-tensorrt:
 	docker build \
 	  -f docker/tensorrt/Dockerfile \
 	  -t $(IMAGE_TENSORRT) \
 	  .
+
+# Force a clean rebuild — pulls the latest NGC base image and skips layer cache.
+docker-rebuild-tensorrt:
+	docker build \
+	  --no-cache \
+	  --pull \
+	  -f docker/tensorrt/Dockerfile \
+	  -t $(IMAGE_TENSORRT) \
+	  .
+
+# Run the Condor server with the TRT backend.
+# Override models/config dirs with MODELS_DIR and CONFIG_DIR variables:
+#   make docker-run-tensorrt MODELS_DIR=/data/models CONFIG_DIR=/data/config
+MODELS_DIR ?= $(PWD)/models
+CONFIG_DIR  ?= $(PWD)/config
+
+docker-run-tensorrt:
+	docker run --rm -it --runtime nvidia \
+	  -p 5555:5555 \
+	  -v $(MODELS_DIR):/app/models \
+	  -v $(CONFIG_DIR):/app/config \
+	  $(IMAGE_TENSORRT)
+
+# Interactive dev shell inside the TRT container (code is baked in).
+docker-shell-tensorrt:
+	docker run --rm -it --runtime nvidia \
+	  --entrypoint bash \
+	  $(IMAGE_TENSORRT)
+
+# Run the full pytest suite against the baked-in code.
+docker-test-tensorrt:
+	docker run --rm --runtime nvidia \
+	  --entrypoint python \
+	  $(IMAGE_TENSORRT) \
+	  -m pytest tests/ -v

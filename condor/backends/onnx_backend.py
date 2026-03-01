@@ -6,11 +6,17 @@ import asyncio
 import logging
 
 import numpy as np
-import onnxruntime as ort
 
 from .base import ONNX_TYPE_TO_NUMPY, BaseBackend, ModelInfo
 
 logger = logging.getLogger(__name__)
+
+try:
+    import onnxruntime as ort
+    ONNXRUNTIME_SUPPORT = True
+except ImportError:
+    ort = None  # type: ignore[assignment]
+    ONNXRUNTIME_SUPPORT = False
 
 
 class OnnxRuntimeBackend(BaseBackend):
@@ -57,6 +63,11 @@ class OnnxRuntimeBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def _load_sync(self, model_path: str, config: dict) -> None:
+        if not ONNXRUNTIME_SUPPORT:
+            raise RuntimeError(
+                "onnxruntime is not installed. "
+                "Install it with: uv pip install onnxruntime"
+            )
         provider_name = config.get("provider", "cpu").lower()
         provider_options = config.get("provider_options", {})
 
@@ -70,6 +81,9 @@ class OnnxRuntimeBackend(BaseBackend):
         self._session = ort.InferenceSession(model_path, providers=providers)
         self._model_info = self._extract_model_info()
         logger.info("Model loaded successfully: %s", self._model_info)
+        # Log the providers that ONNX Runtime actually activated (may differ from
+        # the requested list if some ops fell back to a lower-priority provider).
+        logger.info("Active session providers: %s", self._session.get_providers())
 
     def _infer_sync(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         assert self._session is not None
@@ -99,9 +113,10 @@ class OnnxRuntimeBackend(BaseBackend):
                 )
                 return ["CPUExecutionProvider"]
 
-            ov_opts: dict = {
-                "device_type": options.get("device_type", "CPU"),
-            }
+            # Start from a copy of all user-supplied options so that keys like
+            # cache_dir, num_of_threads, etc. are forwarded to the EP unchanged.
+            ov_opts: dict = dict(options)
+            ov_opts.setdefault("device_type", "CPU")
             logger.info("OpenVINO EP options: %s", ov_opts)
             return [
                 ("OpenVINOExecutionProvider", ov_opts),

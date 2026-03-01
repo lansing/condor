@@ -127,6 +127,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--endpoint", default="tcp://localhost:5555")
     p.add_argument("--model",    default="MDV6-yolov10-c_float16_320.onnx")
     p.add_argument("--image",    default="sample_image.jpg")
+    p.add_argument("--input-size", type=int, default=320,
+                   help="Square input resolution to resize the image to (default: 320).")
     p.add_argument("--runs",     type=int, default=1,
                    help="Number of inference runs for benchmarking (default: 1).")
     p.add_argument("--verbose",  action="store_true")
@@ -210,7 +212,7 @@ def main() -> None:
         # ----------------------------------------------------------------
         # Pre-process image once
         # ----------------------------------------------------------------
-        tensor = preprocess(image_path)
+        tensor = preprocess(image_path, input_size=(args.input_size, args.input_size))
         print(f"\nInput tensor: shape={list(tensor.shape)}  dtype={tensor.dtype}")
 
         # ----------------------------------------------------------------

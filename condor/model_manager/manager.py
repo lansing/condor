@@ -21,6 +21,7 @@ import aiofiles
 
 from ..backends.base import BaseBackend, ModelInfo
 from ..backends.onnx_backend import OnnxRuntimeBackend
+from ..backends.tensorrt_backend import TensorRTBackend
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,17 @@ class AsyncModelManager:
     @property
     def model_info(self) -> ModelInfo | None:
         return self._backend.model_info if self._backend is not None else None
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _make_backend(self) -> BaseBackend:
+        """Instantiate the correct backend based on the configured provider."""
+        provider = self.inference_config.get("provider", "cpu").lower()
+        if provider == "tensorrt":
+            return TensorRTBackend()
+        return OnnxRuntimeBackend()
 
     # ------------------------------------------------------------------
     # Public API
@@ -96,7 +108,7 @@ class AsyncModelManager:
                 self._active_model = None
 
             try:
-                backend = OnnxRuntimeBackend()
+                backend = self._make_backend()
                 await backend.load(str(model_path), self.inference_config)
                 self._backend = backend
                 self._active_model = model_name
