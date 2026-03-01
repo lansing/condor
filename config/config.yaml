@@ -1,0 +1,26 @@
+# Frigate Remote Detector Server Configuration
+# Extended options are commented out with their default values shown.
+
+server:
+  # ZMQ REP socket endpoint. Use tcp://*:<port> for TCP or ipc:// for Unix socket.
+  endpoint: "tcp://*:5555"
+  # Directory where model files are stored and received from Frigate.
+  models_dir: "./models"
+
+inference:
+  # Execution provider for ONNX Runtime.
+  # Options: "cpu", "openvino"
+  # For openvino, run: make install-openvino
+  provider: "cpu"
+  # Provider-specific options (uncomment and configure as needed):
+  # provider_options:
+  #   device_type: "CPU"  # For openvino: "CPU", "GPU", "AUTO", "GPU.0", etc.
+
+post_process:
+  # Minimum confidence score to include a detection in results.
+  # confidence_threshold: 0.4
+  # Maximum number of detections to return (protocol max is 20).
+  # max_detections: 20
+
+# logging:
+#   level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
