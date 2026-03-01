@@ -95,6 +95,8 @@ class AsyncZMQHandler:
                 except zmq.ZMQError as exc:
                     logger.error("ZMQ send error: %s", exc)
         finally:
+            # linger=0: discard unsent messages immediately so ctx.term() doesn't block.
+            self._socket.setsockopt(zmq.LINGER, 0)
             self._socket.close()
             self._ctx.term()
             logger.info("ZMQ server shut down.")

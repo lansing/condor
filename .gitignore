@@ -10,6 +10,13 @@ node_modules/
 # Build output
 dist/
 
+# Data
+models
+
+# Other repos
+frigate
+apple-silicon-detector
+
 # OS files
 .DS_Store
 *.swp

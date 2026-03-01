@@ -40,16 +40,22 @@ async def _run(config_path: str) -> None:
     handler = AsyncZMQHandler(config)
 
     loop = asyncio.get_running_loop()
+    current_task = asyncio.current_task()
 
-    # Graceful shutdown on SIGINT / SIGTERM
+    # Cancel the running task so that CancelledError is raised at the blocked
+    # `await recv_multipart()` — setting a flag alone does not unblock the await.
     def _signal_handler() -> None:
         logging.getLogger(__name__).info("Shutdown signal received.")
-        asyncio.create_task(handler.shutdown())
+        if current_task and not current_task.done():
+            current_task.cancel()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    await handler.run()
+    try:
+        await handler.run()
+    except asyncio.CancelledError:
+        pass  # Normal shutdown path — handler.run() already cleaned up in its finally block
 
 
 def main() -> None:

@@ -11,7 +11,7 @@ inference:
   # Execution provider for ONNX Runtime.
   # Options: "cpu", "openvino"
   # For openvino, run: make install-openvino
-  provider: "cpu"
+  provider: "openvino"
   # Provider-specific options (uncomment and configure as needed):
   # provider_options:
   #   device_type: "CPU"  # For openvino: "CPU", "GPU", "AUTO", "GPU.0", etc.
