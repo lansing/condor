@@ -16,9 +16,10 @@ inference:
   #   "openvino"  — ONNX Runtime, OpenVINO execution provider (Intel GPU/CPU).
   #                 Requires onnxruntime-openvino: run make install-openvino.
   provider: "tensorrt"
-  provider_options:
-    # CUDA device index (0 = first GPU).
-    device: 0
+  #provider_options:
+  #  device: 0
+  #provider: "openvino"
+
 
 post_process:
   # Minimum confidence score to include a detection in results.

@@ -137,15 +137,14 @@ class TensorRTBackend(BaseBackend):
     """Async-wrapped TensorRT inference backend.
 
     Follows the CUDA session lifecycle defined in docs/requirements/TENSORRT.md:
-      load()    → cuInit → cuCtxCreate → cuStreamCreate → engine deserialise
+      load()    → cuInit → cuCtxCreate → engine deserialise
                   → allocate buffers → extract ModelInfo
-      infer()   → cuCtxPush → H→D copy → execute_v2 → D→H copy → sync → pop
-      cleanup() → free buffers → destroy stream/context
+      infer()   → cuCtxPush → H→D copy (sync) → execute_v2 → D→H copy (sync) → pop
+      cleanup() → free buffers → destroy context
     """
 
     def __init__(self) -> None:
         self._cu_ctx = None
-        self._cu_stream = None
         self._engine = None
         self._context = None
         self._inputs: list[HostDeviceMem] = []
@@ -208,19 +207,16 @@ class TensorRTBackend(BaseBackend):
         # cuda.bindings 12.x added ctxCreateParams as the first arg (None = defaults).
         self._cu_ctx = _unwrap(cu.cuCtxCreate(None, 0, cu_device), "cuCtxCreate")
 
-        # 4. Create CUDA stream.
-        self._cu_stream = _unwrap(cu.cuStreamCreate(0), "cuStreamCreate")
-
-        # 5. TRT logger.
+        # 4. TRT logger.
         trt_logger = TrtLogger()
 
-        # 6. Register built-in plugins (non-fatal for YOLOv10 which uses no plugins).
+        # 5. Register built-in plugins (non-fatal for YOLOv10 which uses no plugins).
         try:
             trt.init_libnvinfer_plugins(trt_logger, "")
         except OSError as exc:
             logger.warning("init_libnvinfer_plugins failed (non-fatal): %s", exc)
 
-        # 7. Deserialise TRT engine.
+        # 6. Deserialise TRT engine.
         logger.info("Deserialising engine: %s", model_path)
         runtime = trt.Runtime(trt_logger)
         with open(model_path, "rb") as fh:
@@ -232,13 +228,13 @@ class TensorRTBackend(BaseBackend):
                 "The engine may have been compiled for a different GPU architecture."
             )
 
-        # 8. Execution context.
+        # 7. Execution context.
         self._context = self._engine.create_execution_context()
 
-        # 9. Allocate host + device buffers and build bindings list.
+        # 8. Allocate host + device buffers and build bindings list.
         self._inputs, self._outputs, self._bindings = self._allocate_buffers()
 
-        # 10. Extract ModelInfo from engine metadata.
+        # 9. Extract ModelInfo from engine metadata.
         self._model_info = self._extract_model_info()
         logger.info("TRT engine loaded: %s", self._model_info)
 
@@ -246,44 +242,51 @@ class TensorRTBackend(BaseBackend):
         # 1. Push CUDA context onto this thread's context stack.
         _check(cu.cuCtxPushCurrent(self._cu_ctx), "cuCtxPushCurrent")
         try:
-            # 2. Copy input data into the pinned host buffer and transfer H→D.
+            # 2. Copy input → pinned host buffer, then H→D (synchronous).
+            #
+            # IMPORTANT: cuMemcpyHtoD (not HtoDAsync) is required here.
+            # execute_v2 uses TRT's own internal CUDA stream, which is a
+            # separate non-null stream from any user-created stream.  Two
+            # non-null CUDA streams have no implicit ordering guarantee, so
+            # an async H→D copy on a different stream is not guaranteed to
+            # complete before execute_v2 starts reading device memory.  That
+            # race causes inference to run on the *previous* frame's data
+            # (one-behind leakage).  The synchronous copy blocks this CPU
+            # thread until the DMA is done, so device memory is fully written
+            # before execute_v2 is called.
             np.copyto(self._inputs[0].host, input_tensor.ravel())
             _check(
-                cu.cuMemcpyHtoDAsync(
+                cu.cuMemcpyHtoD(
                     self._inputs[0].device,
                     self._inputs[0]._host_ptr,
                     self._inputs[0]._nbytes,
-                    self._cu_stream,
                 ),
-                "cuMemcpyHtoDAsync",
+                "cuMemcpyHtoD",
             )
 
-            # 3. Execute engine.
+            # 3. Execute engine (synchronous — blocks until GPU work is done).
             ok = self._context.execute_v2(self._bindings)
             if not ok:
                 logger.warning("TRT execute_v2 returned False — output may be invalid.")
 
-            # 4. Transfer outputs D→H.
+            # 4. Transfer outputs D→H (synchronous).
+            #    execute_v2 has already returned, so output device buffers are
+            #    fully written; a synchronous copy is correct and sufficient.
             for out in self._outputs:
                 _check(
-                    cu.cuMemcpyDtoHAsync(
+                    cu.cuMemcpyDtoH(
                         out._host_ptr,
                         out.device,
                         out._nbytes,
-                        self._cu_stream,
                     ),
-                    "cuMemcpyDtoHAsync",
+                    "cuMemcpyDtoH",
                 )
 
-            # 5. Synchronise — blocks this thread (not the event loop) until GPU
-            #    work is complete.
-            _check(cu.cuStreamSynchronize(self._cu_stream), "cuStreamSynchronize")
-
         finally:
-            # 6. Always pop the context, even on error.
+            # 5. Always pop the context, even on error.
             cu.cuCtxPopCurrent()
 
-        # 7. Return a copy of each output buffer reshaped to its declared shape.
+        # 6. Return a copy of each output buffer reshaped to its declared shape.
         return [
             out.host.copy().reshape(shape)
             for out, shape in zip(self._outputs, self._model_info.output_shapes)
@@ -304,13 +307,6 @@ class TensorRTBackend(BaseBackend):
             except Exception:
                 pass
         self._inputs = []
-
-        if self._cu_stream is not None:
-            try:
-                cu.cuStreamDestroy(self._cu_stream)
-            except Exception:
-                pass
-            self._cu_stream = None
 
         # engine and context don't need explicit CUDA calls — Python GC handles it.
         self._context = None
