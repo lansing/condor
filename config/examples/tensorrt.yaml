@@ -1,0 +1,32 @@
+# Condor — TensorRT Backend
+#
+# Requirements:
+#   Host:      NVIDIA driver + Docker with NVIDIA Container Toolkit
+#   Container: condor:tensorrt  (NGC nvcr.io/nvidia/tensorrt base image)
+#   Run flag:  --runtime nvidia  (or --gpus all)
+#
+# NEVER install TensorRT, CUDA toolkit, or cuda-python on the host system.
+# ALWAYS run via the dedicated Docker image — see make docker-run-tensorrt.
+#
+# Model files must be pre-compiled .engine files for the target GPU
+# architecture.  An engine built on one GPU will not run on a different
+# GPU architecture.  Compile on the target machine with:
+#   trtexec --onnx=model.onnx --saveEngine=model.engine --fp16
+#
+# See docs/requirements/TENSORRT.md for the full workflow.
+
+server:
+  endpoint: "tcp://*:5555"
+  models_dir: "./models"
+
+inference:
+  provider: "tensorrt"
+  provider_options:
+    device: 0   # CUDA device index (default: 0)
+
+post_process:
+  confidence_threshold: 0.4
+  max_detections: 20
+
+logging:
+  level: "INFO"

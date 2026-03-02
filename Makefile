@@ -1,9 +1,10 @@
 .PHONY: install run test test-client lint \
         docker-build-onnx docker-run-onnx \
-        docker-build-openvino \
+        docker-build-onnx-cuda docker-run-onnx-cuda docker-shell-onnx-cuda docker-test-onnx-cuda \
+        docker-build-openvino docker-run-openvino \
         docker-build-tensorrt docker-rebuild-tensorrt \
         docker-run-tensorrt docker-shell-tensorrt docker-test-tensorrt \
-        install-openvino
+        install-openvino install-onnxruntime-openvino
 
 CONFIG ?= config/config.yaml
 
@@ -25,20 +26,31 @@ test:
 test-client:
 	uv run python scripts/test_client.py --config $(CONFIG)
 
-# ── OpenVINO EP (onnxruntime-openvino) ────────────────────────────────────────
-# Swaps the standard onnxruntime wheel for the OpenVINO-bundled one.
-# Set provider: "openvino" in config/config.yaml afterwards.
+# ── OpenVINO ───────────────────────────────────────────────────────────────────
+# Install the native OpenVINO backend extra (provider: "openvino").
 install-openvino:
+	uv sync --extra openvino
+
+# Install onnxruntime-openvino EP for use with provider: "onnx" +
+# execution_provider: "OpenVINOExecutionProvider" in provider_options.
+install-onnxruntime-openvino:
 	uv pip uninstall onnxruntime --yes || true
 	uv pip install onnxruntime-openvino
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 
-IMAGE_ONNX     ?= condor:onnxruntime
-IMAGE_OPENVINO ?= condor:openvino
-IMAGE_TENSORRT ?= condor:tensorrt
+IMAGE_ONNX      ?= condor:onnxruntime
+IMAGE_ONNX_CUDA ?= condor:onnxruntime-cuda
+IMAGE_OPENVINO  ?= condor:openvino
+IMAGE_TENSORRT  ?= condor:tensorrt
 
-# ONNX Runtime (CPU + optional OpenVINO EP)
+# Override models/config mount paths:
+#   make docker-run-tensorrt MODELS_DIR=/data/models CONFIG_DIR=/data/config
+MODELS_DIR ?= $(PWD)/models
+CONFIG_DIR  ?= $(PWD)/config
+
+# ── ONNX Runtime (CPU + optional OpenVINO EP) ─────────────────────────────────
+
 docker-build-onnx:
 	docker build \
 	  -f docker/onnxruntime/Dockerfile \
@@ -52,14 +64,55 @@ docker-run-onnx:
 	  -v $(PWD)/config:/app/config \
 	  $(IMAGE_ONNX)
 
-# OpenVINO native backend (Phase 2)
+# ── ONNX Runtime CUDA EP ───────────────────────────────────────────────────────
+#
+# Requires: NVIDIA driver on the host + Docker with NVIDIA Container Toolkit.
+# NEVER run without --gpus all.  NEVER install onnxruntime-gpu on the host.
+
+docker-build-onnx-cuda:
+	docker build \
+	  -f docker/onnxruntime-cuda/Dockerfile \
+	  -t $(IMAGE_ONNX_CUDA) \
+	  .
+
+docker-run-onnx-cuda:
+	docker run --rm -it --gpus all \
+	  -p 5555:5555 \
+	  -v $(MODELS_DIR):/app/models \
+	  -v $(CONFIG_DIR):/app/config \
+	  $(IMAGE_ONNX_CUDA)
+
+docker-shell-onnx-cuda:
+	docker run --rm -it --gpus all \
+	  --entrypoint bash \
+	  $(IMAGE_ONNX_CUDA)
+
+docker-test-onnx-cuda:
+	docker run --rm --gpus all \
+	  --entrypoint python \
+	  $(IMAGE_ONNX_CUDA) \
+	  -m pytest tests/ -v
+
+# ── Native OpenVINO backend ────────────────────────────────────────────────────
+
 docker-build-openvino:
 	docker build \
 	  -f docker/openvino/Dockerfile \
 	  -t $(IMAGE_OPENVINO) \
 	  .
 
-# TensorRT backend
+docker-run-openvino:
+	docker run --rm -it \
+	  -p 5555:5555 \
+	  -v $(PWD)/models:/app/models \
+	  -v $(PWD)/config:/app/config \
+	  $(IMAGE_OPENVINO)
+
+# ── TensorRT backend ───────────────────────────────────────────────────────────
+#
+# Requires: NVIDIA driver on the host + Docker with NVIDIA Container Toolkit.
+# NEVER run without --runtime nvidia.  NEVER install TensorRT on the host.
+
 docker-build-tensorrt:
 	docker build \
 	  -f docker/tensorrt/Dockerfile \
@@ -75,12 +128,6 @@ docker-rebuild-tensorrt:
 	  -t $(IMAGE_TENSORRT) \
 	  .
 
-# Run the Condor server with the TRT backend.
-# Override models/config dirs with MODELS_DIR and CONFIG_DIR variables:
-#   make docker-run-tensorrt MODELS_DIR=/data/models CONFIG_DIR=/data/config
-MODELS_DIR ?= $(PWD)/models
-CONFIG_DIR  ?= $(PWD)/config
-
 docker-run-tensorrt:
 	docker run --rm -it --runtime nvidia \
 	  -p 5555:5555 \
@@ -88,13 +135,11 @@ docker-run-tensorrt:
 	  -v $(CONFIG_DIR):/app/config \
 	  $(IMAGE_TENSORRT)
 
-# Interactive dev shell inside the TRT container (code is baked in).
 docker-shell-tensorrt:
 	docker run --rm -it --runtime nvidia \
 	  --entrypoint bash \
 	  $(IMAGE_TENSORRT)
 
-# Run the full pytest suite against the baked-in code.
 docker-test-tensorrt:
 	docker run --rm --runtime nvidia \
 	  --entrypoint python \

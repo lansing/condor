@@ -1,0 +1,33 @@
+# Condor — ONNX Runtime, Intel OpenVINO Execution Provider
+#
+# Requirements:
+#   make install-onnxruntime-openvino   (swaps onnxruntime for onnxruntime-openvino)
+#   OR: docker build --build-arg ONNX_PACKAGE=onnxruntime-openvino \
+#             -f docker/onnxruntime/Dockerfile -t condor:onnxruntime-openvino .
+#
+# Supported device values for OpenVINO EP:
+#   CPU       — Intel CPU via OpenVINO IR runtime
+#   GPU       — Intel integrated / Arc GPU (requires i915/xe driver)
+#   AUTO      — OpenVINO picks the best available device at startup
+#   NPU       — Intel NPU (Meteor Lake and newer)
+#
+# Note: this uses the OpenVINO EP inside ONNX Runtime (onnxruntime-openvino
+# package), NOT the native OpenVINO backend.  For the native backend use
+# provider: "openvino" instead.
+
+server:
+  endpoint: "tcp://*:5555"
+  models_dir: "./models"
+
+inference:
+  provider: "onnx"
+  provider_options:
+    execution_provider: "OpenVINOExecutionProvider"
+    device: "CPU"   # or GPU, AUTO, NPU
+
+post_process:
+  confidence_threshold: 0.4
+  max_detections: 20
+
+logging:
+  level: "INFO"

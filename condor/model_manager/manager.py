@@ -21,6 +21,7 @@ import aiofiles
 
 from ..backends.base import BaseBackend, ModelInfo
 from ..backends.onnx_backend import OnnxRuntimeBackend
+from ..backends.openvino_backend import OpenVINOBackend
 from ..backends.tensorrt_backend import TensorRTBackend
 
 logger = logging.getLogger(__name__)
@@ -57,9 +58,17 @@ class AsyncModelManager:
 
     def _make_backend(self) -> BaseBackend:
         """Instantiate the correct backend based on the configured provider."""
-        provider = self.inference_config.get("provider", "cpu").lower()
+        provider = self.inference_config.get("provider", "onnx").lower()
         if provider == "tensorrt":
             return TensorRTBackend()
+        if provider == "openvino":
+            return OpenVINOBackend()
+        if provider == "cpu":
+            # Legacy alias — treated as ONNX Runtime with default EP selection.
+            logger.warning(
+                "provider: 'cpu' is deprecated; use provider: 'onnx' instead."
+            )
+            return OnnxRuntimeBackend()
         return OnnxRuntimeBackend()
 
     # ------------------------------------------------------------------

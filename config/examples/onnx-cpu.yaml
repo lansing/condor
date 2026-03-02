@@ -1,0 +1,29 @@
+# Condor — ONNX Runtime, CPU Execution Provider
+#
+# Requirements:
+#   make install          (standard uv sync)
+#   make docker-run-onnx  (or condor:onnxruntime image)
+#
+# Notes:
+#   - Works on any x86-64 or ARM64 machine with no special hardware.
+#   - Omitting execution_provider lets ORT choose its top-ranked available EP
+#     (CPUExecutionProvider on a machine without GPU drivers installed).
+#   - Set execution_provider explicitly if you want a guaranteed fallback.
+
+server:
+  endpoint: "tcp://*:5555"
+  models_dir: "./models"
+
+inference:
+  provider: "onnx"
+  # provider_options not required for pure CPU — ORT defaults to CPU.
+  # To be explicit:
+  #provider_options:
+  #  execution_provider: "CPUExecutionProvider"
+
+post_process:
+  confidence_threshold: 0.4
+  max_detections: 20
+
+logging:
+  level: "INFO"

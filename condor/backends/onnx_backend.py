@@ -1,4 +1,18 @@
-"""ONNX Runtime backend supporting CPU and Intel OpenVINO execution providers."""
+"""ONNX Runtime backend.
+
+The provider is always ``"onnx"`` in config; the specific execution provider
+(EP) is selected via ``provider_options``:
+
+  provider: "onnx"
+  provider_options:
+    # Optional — if omitted, ORT uses its default priority order.
+    execution_provider: "OpenVINOExecutionProvider"
+    # Optional — device hint forwarded to the EP (EP-specific meaning).
+    device: "GPU"
+
+If ``execution_provider`` is specified it MUST be available; a RuntimeError is
+raised immediately if it is not, rather than silently falling back.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +38,6 @@ class OnnxRuntimeBackend(BaseBackend):
 
     Blocking ONNX Runtime calls are offloaded to a thread-pool executor via
     ``asyncio.to_thread`` so the event loop is never blocked.
-
-    Supported providers (configured via *config["provider"]*):
-      - ``"cpu"``      → CPUExecutionProvider
-      - ``"openvino"`` → OpenVINOExecutionProvider (falls back to CPU if unavailable)
     """
 
     def __init__(self) -> None:
@@ -68,21 +78,23 @@ class OnnxRuntimeBackend(BaseBackend):
                 "onnxruntime is not installed. "
                 "Install it with: uv pip install onnxruntime"
             )
-        provider_name = config.get("provider", "cpu").lower()
-        provider_options = config.get("provider_options", {})
 
-        providers = self._resolve_providers(provider_name, provider_options)
+        provider_options = config.get("provider_options", {})
+        requested_ep = provider_options.get("execution_provider")
+        device = provider_options.get("device")
+
+        providers = self._resolve_providers(requested_ep, device)
         logger.info(
             "Loading ONNX model %s with providers %s",
             model_path,
-            [p if isinstance(p, str) else p[0] for p in providers],
+            providers if providers is not None else "(ORT defaults)",
         )
 
         self._session = ort.InferenceSession(model_path, providers=providers)
         self._model_info = self._extract_model_info()
         logger.info("Model loaded successfully: %s", self._model_info)
-        # Log the providers that ONNX Runtime actually activated (may differ from
-        # the requested list if some ops fell back to a lower-priority provider).
+        # Log the providers that ORT actually activated (may differ from the
+        # requested list if some ops fell back to a lower-priority provider).
         logger.info("Active session providers: %s", self._session.get_providers())
 
     def _infer_sync(self, input_tensor: np.ndarray) -> list[np.ndarray]:
@@ -97,38 +109,56 @@ class OnnxRuntimeBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def _resolve_providers(
-        self, provider: str, options: dict
-    ) -> list[str | tuple[str, dict]]:
-        """Build the ONNX Runtime provider list from config.
+        self,
+        execution_provider: str | None,
+        device: str | None,
+    ) -> list[str | tuple[str, dict]] | None:
+        """Build the ORT providers list from config.
 
-        If the requested provider is unavailable, warn and fall back to CPU.
+        Returns ``None`` to let ORT use its own default priority order.
+        Raises ``RuntimeError`` if a specified EP is not available.
         """
-        available = set(ort.get_available_providers())
-
-        if provider == "openvino":
-            if "OpenVINOExecutionProvider" not in available:
+        if execution_provider is None:
+            if device is not None:
                 logger.warning(
-                    "OpenVINOExecutionProvider is not available "
-                    "(install onnxruntime-openvino). Falling back to CPU."
+                    "provider_options.device=%r ignored: "
+                    "no execution_provider was specified.",
+                    device,
                 )
-                return ["CPUExecutionProvider"]
+            return None  # let ORT pick
 
-            # Start from a copy of all user-supplied options so that keys like
-            # cache_dir, num_of_threads, etc. are forwarded to the EP unchanged.
-            ov_opts: dict = dict(options)
-            ov_opts.setdefault("device_type", "CPU")
-            logger.info("OpenVINO EP options: %s", ov_opts)
-            return [
-                ("OpenVINOExecutionProvider", ov_opts),
-                "CPUExecutionProvider",
-            ]
-
-        if provider != "cpu":
-            logger.warning(
-                "Unknown provider %r; falling back to CPU.", provider
+        available = set(ort.get_available_providers())
+        if execution_provider not in available:
+            raise RuntimeError(
+                f"Requested execution_provider {execution_provider!r} is not "
+                f"available in this environment. "
+                f"Available providers: {sorted(available)}"
             )
 
-        return ["CPUExecutionProvider"]
+        opts = self._ep_device_options(execution_provider, device)
+        providers: list[str | tuple[str, dict]] = (
+            [(execution_provider, opts)] if opts else [execution_provider]
+        )
+        # Always append CPU as a fallback so ORT can handle any ops not
+        # supported by the primary EP.
+        if execution_provider != "CPUExecutionProvider":
+            providers.append("CPUExecutionProvider")
+        return providers
+
+    def _ep_device_options(self, ep: str, device: str | None) -> dict:
+        """Return the EP-specific dict for the given device name."""
+        if device is None:
+            return {}
+        if ep == "OpenVINOExecutionProvider":
+            return {"device_type": device}
+        if ep == "CUDAExecutionProvider":
+            return {"device_id": str(device)}
+        logger.warning(
+            "No device-key mapping known for EP %r; "
+            "passing device as a generic 'device' key.",
+            ep,
+        )
+        return {"device": device}
 
     def _extract_model_info(self) -> ModelInfo:
         assert self._session is not None

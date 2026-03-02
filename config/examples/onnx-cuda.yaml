@@ -1,0 +1,34 @@
+# Condor — ONNX Runtime, CUDA Execution Provider
+#
+# Requirements:
+#   Host:      NVIDIA driver + Docker with NVIDIA Container Toolkit
+#   Container: condor:onnxruntime-cuda  (includes onnxruntime-gpu)
+#   Run flag:  --gpus all  (or --runtime nvidia)
+#
+# NEVER install onnxruntime-gpu on the host system.
+# ALWAYS run via the dedicated Docker image — see make docker-run-onnx-cuda.
+#
+# Supported device values:
+#   0   — first CUDA GPU (default)
+#   1   — second CUDA GPU
+#   etc.
+#
+# The model file is a standard .onnx file (same as for CPU).
+# ONNX Runtime transparently runs eligible ops on the GPU.
+
+server:
+  endpoint: "tcp://*:5555"
+  models_dir: "./models"
+
+inference:
+  provider: "onnx"
+  provider_options:
+    execution_provider: "CUDAExecutionProvider"
+    device: 0   # CUDA device index
+
+post_process:
+  confidence_threshold: 0.4
+  max_detections: 20
+
+logging:
+  level: "INFO"

@@ -1,0 +1,35 @@
+# Condor — Native OpenVINO Backend
+#
+# Requirements:
+#   make install-openvino          (uv sync --extra openvino)
+#   OR: make docker-run-openvino   (condor:openvino image)
+#
+# This uses the openvino Python package directly — NOT onnxruntime-openvino.
+# The model file is a standard .onnx file; OpenVINO converts it internally.
+#
+# Supported device values:
+#   CPU       — Any x86-64 or ARM64 CPU
+#   GPU       — Intel integrated / discrete GPU (requires i915/xe driver)
+#   AUTO      — OpenVINO selects the best available device at startup
+#   NPU       — Intel NPU (Meteor Lake and newer)
+#   GPU.0     — Explicit index for multi-GPU setups
+#   HETERO:GPU,CPU — Heterogeneous plugin: GPU for supported ops, CPU fallback
+#
+# Note: for Intel GPU access inside Docker, pass:
+#   --device /dev/dri --group-add video
+
+server:
+  endpoint: "tcp://*:5555"
+  models_dir: "./models"
+
+inference:
+  provider: "openvino"
+  provider_options:
+    device: "CPU"   # or GPU, AUTO, NPU, HETERO:GPU,CPU
+
+post_process:
+  confidence_threshold: 0.4
+  max_detections: 20
+
+logging:
+  level: "INFO"

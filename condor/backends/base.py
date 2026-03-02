@@ -23,6 +23,27 @@ ONNX_TYPE_TO_NUMPY: dict[str, str] = {
 }
 
 
+def _detect_layout(shape: list) -> str:
+    """Infer NCHW vs NHWC from a 4-D tensor shape.
+
+    Heuristic: for a shape ``[N, A, B, C]``, if ``A > C`` the channel axis is
+    last (NHWC) because spatial dimensions are always > 3 while the channel
+    count is typically 1 or 3.  If ``A <= C`` the channel axis is second
+    (NCHW).
+
+    Returns ``"nhwc"`` or ``"nchw"``.  Defaults to ``"nchw"`` for shapes that
+    are not 4-D or contain non-integer (symbolic) dimensions.
+    """
+    if len(shape) != 4:
+        return "nchw"
+    try:
+        dim1 = int(shape[1])
+        dim3 = int(shape[3])
+    except (ValueError, TypeError):
+        return "nchw"  # symbolic dim — cannot determine
+    return "nhwc" if dim1 > dim3 else "nchw"
+
+
 @dataclass
 class ModelInfo:
     """Describes a loaded model's input/output tensor specifications."""
@@ -35,9 +56,16 @@ class ModelInfo:
     output_shapes: list[list[int | str]] = field(default_factory=list)
     output_dtypes: list[str] = field(default_factory=list)
 
+    # Derived from input_shape; not part of the constructor.
+    input_layout: str = field(default="nchw", init=False)
+
+    def __post_init__(self) -> None:
+        self.input_layout = _detect_layout(self.input_shape)
+
     def __str__(self) -> str:
         return (
-            f"ModelInfo(input={self.input_name} {self.input_shape} {self.input_dtype}, "
+            f"ModelInfo(input={self.input_name} {self.input_shape} "
+            f"{self.input_dtype} {self.input_layout}, "
             f"outputs={list(zip(self.output_names, self.output_shapes, self.output_dtypes))})"
         )
 

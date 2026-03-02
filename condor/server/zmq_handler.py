@@ -204,7 +204,9 @@ class AsyncZMQHandler:
             shape = tuple(int(d) for d in header["shape"])
             tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(shape)
         except Exception:
-            logger.exception("Failed to reconstruct input tensor from header %s.", header)
+            logger.exception(
+                "Failed to reconstruct input tensor from header %s.", header
+            )
             return _zeros_response()
 
         # --- inference ---
@@ -215,10 +217,16 @@ class AsyncZMQHandler:
             return _zeros_response()
 
         # --- post-process ---
-        # shape is NCHW → (height, width) = (shape[2], shape[3])
+        # Extract spatial dims respecting the model's declared input layout.
         try:
-            input_h = int(shape[2])
-            input_w = int(shape[3])
+            if model_info.input_layout == "nhwc":
+                # [N, H, W, C] → H = shape[1], W = shape[2]
+                input_h = int(shape[1])
+                input_w = int(shape[2])
+            else:
+                # [N, C, H, W] → H = shape[2], W = shape[3]
+                input_h = int(shape[2])
+                input_w = int(shape[3])
             result = await self.post_processor.process(outputs, (input_h, input_w))
         except Exception:
             logger.exception("Post-processing failed.")

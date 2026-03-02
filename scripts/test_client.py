@@ -18,8 +18,24 @@ Usage
   uv run python scripts/test_client.py [--endpoint tcp://localhost:5555]
                                        [--model MDV6-yolov10-c_float16_320.onnx]
                                        [--image sample_image.jpg]
+                                       [--input-size N]
+                                       [--dtype {float32,uint8}]
+                                       [--layout {nchw,nhwc}]
+                                       [--no-normalize]
                                        [--runs N]
                                        [--verbose]
+
+Input format combos
+-------------------
+  ONNX float32 NCHW (default):
+      --dtype float32 --layout nchw
+
+  TRT uint8 NHWC denormalized (e.g. MDV6-yolov10-e_640_float16_uint8_nhwc_denorm.engine):
+      --model MDV6-yolov10-e_640_float16_uint8_nhwc_denorm.engine \\
+      --input-size 640 --dtype uint8 --layout nhwc
+
+  float32 denormalized (values 0-255 instead of 0-1):
+      --dtype float32 --no-normalize
 """
 
 from __future__ import annotations
@@ -66,18 +82,47 @@ def letterbox(
     )
 
 
-def preprocess(image_path: str | Path, input_size: tuple[int, int] = (320, 320)) -> np.ndarray:
-    """Load and preprocess image → float32 NCHW tensor in [0, 1]."""
+def preprocess(
+    image_path: str | Path,
+    input_size: tuple[int, int] = (320, 320),
+    layout: str = "nchw",
+    dtype: str = "float32",
+    normalize: bool = True,
+) -> np.ndarray:
+    """Load and preprocess image into an inference-ready tensor.
+
+    Args:
+        image_path: Path to the source image.
+        input_size: ``(height, width)`` of the model input.
+        layout: ``"nchw"`` (channels-first) or ``"nhwc"`` (channels-last).
+        dtype: ``"float32"`` or ``"uint8"``.
+        normalize: When ``dtype="float32"``, divide by 255 to map to ``[0, 1]``.
+                   Ignored when ``dtype="uint8"`` (always stays in ``[0, 255]``).
+
+    Returns:
+        A 4-D numpy array with a batch dimension prepended:
+        ``(1, C, H, W)`` for NCHW or ``(1, H, W, C)`` for NHWC.
+    """
     img = cv2.imread(str(image_path))
     if img is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
 
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = letterbox(img, new_shape=input_size)
-    img = img.astype(np.float32) / 255.0
-    img = img.transpose(2, 0, 1)       # HWC → CHW
-    img = np.expand_dims(img, 0)       # CHW → NCHW (1, C, H, W)
-    return img
+    # img is now (H, W, C) uint8 in [0, 255]
+
+    if dtype == "uint8":
+        # Keep uint8; normalization makes no sense in this mode.
+        pass
+    else:
+        img = img.astype(np.float32)
+        if normalize:
+            img /= 255.0
+
+    if layout == "nchw":
+        img = img.transpose(2, 0, 1)  # HWC → CHW
+
+    return np.expand_dims(img, 0)  # add batch dim → (1, ...)
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +172,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--endpoint", default="tcp://localhost:5555")
     p.add_argument("--model",    default="MDV6-yolov10-c_float16_320.onnx")
     p.add_argument("--image",    default="sample_image.jpg")
-    p.add_argument("--input-size", type=int, default=320,
-                   help="Square input resolution to resize the image to (default: 320).")
-    p.add_argument("--runs",     type=int, default=1,
-                   help="Number of inference runs for benchmarking (default: 1).")
+    p.add_argument(
+        "--input-size", type=int, default=320,
+        help="Square input resolution to resize the image to (default: 320).",
+    )
+    p.add_argument(
+        "--dtype", default="float32", choices=["float32", "uint8"],
+        help="Input tensor dtype sent to the server (default: float32).",
+    )
+    p.add_argument(
+        "--layout", default="nchw", choices=["nchw", "nhwc"],
+        help="Input tensor layout (default: nchw). Use nhwc for models that "
+             "expect channels-last input.",
+    )
+    p.add_argument(
+        "--no-normalize", action="store_true",
+        help="Do not divide float32 values by 255 — send raw [0, 255] floats. "
+             "Has no effect when --dtype=uint8.",
+    )
+    p.add_argument(
+        "--runs", type=int, default=1,
+        help="Number of inference runs for benchmarking (default: 1).",
+    )
     p.add_argument("--verbose",  action="store_true")
     return p.parse_args()
 
@@ -174,6 +237,9 @@ def main() -> None:
         print(f"ERROR: Image not found: {image_path}", file=sys.stderr)
         sys.exit(1)
 
+    # Normalization: only meaningful for float32; uint8 is always [0, 255].
+    normalize = (args.dtype == "float32") and (not args.no_normalize)
+
     # ----------------------------------------------------------------
     # ZMQ connection
     # ----------------------------------------------------------------
@@ -212,8 +278,23 @@ def main() -> None:
         # ----------------------------------------------------------------
         # Pre-process image once
         # ----------------------------------------------------------------
-        tensor = preprocess(image_path, input_size=(args.input_size, args.input_size))
-        print(f"\nInput tensor: shape={list(tensor.shape)}  dtype={tensor.dtype}")
+        tensor = preprocess(
+            image_path,
+            input_size=(args.input_size, args.input_size),
+            layout=args.layout,
+            dtype=args.dtype,
+            normalize=normalize,
+        )
+        value_range = (
+            f"[{tensor.min():.1f}, {tensor.max():.1f}]"
+            if args.dtype == "float32"
+            else f"[{int(tensor.min())}, {int(tensor.max())}]"
+        )
+        print(
+            f"\nInput tensor: shape={list(tensor.shape)}  "
+            f"dtype={tensor.dtype}  layout={args.layout}  "
+            f"values={value_range}"
+        )
 
         # ----------------------------------------------------------------
         # Stage 2 — inference

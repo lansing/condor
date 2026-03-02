@@ -8,17 +8,38 @@ server:
   models_dir: "./models"
 
 inference:
-  # Inference backend / execution provider.
+  # Inference backend.
   # Options:
+  #   "onnx"      — ONNX Runtime (CPU + optional hardware EPs).
+  #                 provider_options:
+  #                   execution_provider: "CPUExecutionProvider"       # default
+  #                   execution_provider: "OpenVINOExecutionProvider"  # needs onnxruntime-openvino
+  #                   execution_provider: "CUDAExecutionProvider"      # needs onnxruntime-gpu
+  #                   device: "GPU"   # EP-specific device (e.g. CPU/GPU/AUTO for OpenVINO EP)
+  #
+  #   "openvino"  — Native OpenVINO runtime (not onnxruntime-openvino).
+  #                 Requires: uv sync --extra openvino  (or condor:openvino image).
+  #                 provider_options:
+  #                   device: "CPU"   # or GPU, AUTO, NPU, etc.  Default: CPU.
+  #
   #   "tensorrt"  — TensorRT engine (.engine file); requires condor:tensorrt image
   #                 with --runtime nvidia.  See docs/requirements/TENSORRT.md.
-  #   "cpu"       — ONNX Runtime, CPU execution provider.
-  #   "openvino"  — ONNX Runtime, OpenVINO execution provider (Intel GPU/CPU).
-  #                 Requires onnxruntime-openvino: run make install-openvino.
+  #                 provider_options:
+  #                   device: 0       # CUDA device index.  Default: 0.
   provider: "tensorrt"
   #provider_options:
   #  device: 0
+
+  # --- ONNX examples ---
+  #provider: "onnx"
+  #provider_options:
+  #  execution_provider: "OpenVINOExecutionProvider"
+  #  device: "GPU"
+
+  # --- Native OpenVINO example ---
   #provider: "openvino"
+  #provider_options:
+  #  device: "AUTO"
 
 
 post_process:
