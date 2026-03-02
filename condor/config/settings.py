@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, model_validator
 class ServerConfig(BaseModel):
     endpoint: str = "tcp://*:5555"
     models_dir: str = "./models"
+    num_workers: int = 1
+    base_port: int = 5555
 
 
 class InferenceConfig(BaseModel):

@@ -49,8 +49,9 @@ def _zeros_response() -> list[bytes]:
 class AsyncZMQHandler:
     """Async ZMQ REP socket + Frigate protocol dispatcher."""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, *, endpoint: str | None = None) -> None:
         self.config = config
+        self._endpoint = endpoint or config.server.endpoint
         self.manager = AsyncModelManager(
             models_dir=config.server.models_dir,
             inference_config=config.inference.model_dump(),
@@ -69,7 +70,7 @@ class AsyncZMQHandler:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        endpoint = self.config.server.endpoint
+        endpoint = self._endpoint
         self._socket.bind(endpoint)
         self._running = True
         logger.info("ZMQ server bound to %s. Ready.", endpoint)

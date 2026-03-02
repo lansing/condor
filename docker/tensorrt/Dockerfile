@@ -70,7 +70,7 @@ COPY config/config.yaml /app/config/config.yaml
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-EXPOSE 5555
+EXPOSE 5555-5559
 
 ENTRYPOINT ["condor"]
 CMD ["--config", "/app/config/config.yaml"]

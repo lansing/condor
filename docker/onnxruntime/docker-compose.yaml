@@ -1,0 +1,32 @@
+# Condor — ONNX Runtime backend (CPU / OpenVINO EP)
+#
+# Mirrors: make docker-run-onnx
+#
+# Usage:
+#   docker compose up            # foreground
+#   docker compose up -d         # detached
+#   docker compose down
+#
+# Multi-worker: set num_workers in config/config.yaml and uncomment
+# the matching port entries below.
+
+services:
+  condor:
+    image: condor:onnxruntime
+    build:
+      context: ../..
+      dockerfile: docker/onnxruntime/Dockerfile
+    restart: "no"
+    ports:
+      - "5555:5555"
+      # Uncomment for num_workers: 2
+      # - "5556:5556"
+      # Uncomment for num_workers: 3
+      # - "5557:5557"
+      # Uncomment for num_workers: 4
+      # - "5558:5558"
+      # Uncomment for num_workers: 5
+      # - "5559:5559"
+    volumes:
+      - ../../models:/app/models
+      - ../../config:/app/config

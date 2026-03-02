@@ -2,10 +2,15 @@
 # Extended options are commented out with their default values shown.
 
 server:
-  # ZMQ REP socket endpoint. Use tcp://*:<port> for TCP or ipc:// for Unix socket.
+  # ZMQ REP socket endpoint. Used only when num_workers: 1 (default single-worker mode).
   endpoint: "tcp://*:5555"
   # Directory where model files are stored and received from Frigate.
   models_dir: "./models"
+  # Number of independent worker threads, each with its own ZMQ REP socket.
+  # Each worker binds to base_port + i so Frigate can be configured with N
+  # separate detector entries pointing to consecutive ports.
+  num_workers: 2       # default: 1 (single-worker, uses endpoint above)
+  base_port: 5555      # workers bind to base_port, base_port+1, ..., base_port+N-1
 
 inference:
   # Inference backend.
