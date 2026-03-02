@@ -10,16 +10,30 @@ Config example::
       provider: "openvino"
       provider_options:
         device: "CPU"   # or GPU, AUTO, NPU, etc.  Default: CPU.
+
+Shared-resource model
+---------------------
+``ov.CompiledModel`` is documented as thread-safe: multiple ``InferRequest``
+objects can be created from one ``CompiledModel`` and used concurrently.  The
+expensive compile step (device JIT, graph optimisation, NPU/GPU upload) runs
+only once per (provider, model_path) key, shared across all workers.
+
+``OVSharedState`` (created in ``load_shared_sync()``) holds the compiled model
+and extracted ``ModelInfo``.  Each worker's ``load()`` calls
+``compiled.create_infer_request()`` to obtain its own ``InferRequest``.
+``cleanup()`` releases the per-worker request only.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from dataclasses import dataclass
 
 import numpy as np
 
-from .base import BaseBackend, ModelInfo
+from .base import BaseBackend, ModelInfo, SharedBackendState
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +79,17 @@ def _shape_to_list(partial_shape) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# Shared state dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OVSharedState(SharedBackendState):
+    """Resources shared across all OpenVINO worker instances for one model."""
+    compiled: object    # ov.CompiledModel (thread-safe for create_infer_request)
+    model_info: ModelInfo
+
+
+# ---------------------------------------------------------------------------
 # OpenVINOBackend
 # ---------------------------------------------------------------------------
 
@@ -76,25 +101,66 @@ class OpenVINOBackend(BaseBackend):
 
     Lifecycle::
 
-        load()    → ov.Core() → core.read_model() → core.compile_model(device)
-                    → compiled.create_infer_request() → extract ModelInfo
-        infer()   → request.infer({input_name: tensor})
-                    → collect output tensors
-        cleanup() → release references (GC handles OV resources)
+        load_shared_sync()  [once]
+          → ov.Core() → core.read_model() → core.compile_model(device)
+          → extract ModelInfo
+          → return OVSharedState(compiled, model_info)
+
+        load()  [per worker]
+          → compiled.create_infer_request()  (per-worker InferRequest)
+
+        infer()  [per request]
+          → [acquire infer_sem] request.infer() [release]
+          → collect output tensors
+
+        cleanup()  [per worker]
+          → release InferRequest reference only
     """
 
     def __init__(self) -> None:
         self._compiled: ov.CompiledModel | None = None
         self._request: ov.InferRequest | None = None
         self._model_info: ModelInfo | None = None
+        self._infer_sem: threading.BoundedSemaphore | None = None
+
+    # ------------------------------------------------------------------
+    # Shared-resource interface
+    # ------------------------------------------------------------------
+
+    def load_shared_sync(self, model_path: str, config: dict) -> OVSharedState:
+        """Compile the model once; result shared across all workers."""
+        if not OV_SUPPORT:
+            raise RuntimeError(
+                "openvino is not installed. "
+                "Install it with: uv pip install openvino"
+            )
+
+        provider_options = config.get("provider_options", {})
+        device = str(provider_options.get("device", "CPU")).upper()
+        logger.info(
+            "Compiling shared OpenVINO model %s on device %s.", model_path, device
+        )
+
+        core = ov.Core()
+        model = core.read_model(model_path)
+        compiled = core.compile_model(model, device)
+        model_info = self._extract_model_info(compiled)
+        logger.info("OpenVINO shared state ready: %s", model_info)
+        return OVSharedState(compiled=compiled, model_info=model_info)
 
     # ------------------------------------------------------------------
     # BaseBackend interface
     # ------------------------------------------------------------------
 
-    async def load(self, model_path: str, config: dict) -> None:
-        """Compile the model for the target device in a thread."""
-        await asyncio.to_thread(self._load_sync, model_path, config)
+    async def load(
+        self,
+        model_path: str,
+        config: dict,
+        shared: SharedBackendState | None = None,
+        infer_sem: threading.BoundedSemaphore | None = None,
+    ) -> None:
+        """Create a per-worker InferRequest from the shared CompiledModel."""
+        await asyncio.to_thread(self._load_sync, model_path, config, shared, infer_sem)
 
     async def infer(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         """Run OpenVINO inference in a thread and return raw output tensors."""
@@ -103,7 +169,7 @@ class OpenVINOBackend(BaseBackend):
         return await asyncio.to_thread(self._infer_sync, input_tensor)
 
     async def cleanup(self) -> None:
-        """Release all OpenVINO resources."""
+        """Release the per-worker InferRequest."""
         self._request = None
         self._compiled = None
         self._model_info = None
@@ -117,32 +183,34 @@ class OpenVINOBackend(BaseBackend):
     # Synchronous helpers — all run inside asyncio.to_thread
     # ------------------------------------------------------------------
 
-    def _load_sync(self, model_path: str, config: dict) -> None:
-        if not OV_SUPPORT:
-            raise RuntimeError(
-                "openvino is not installed. "
-                "Install it with: uv pip install openvino"
-            )
+    def _load_sync(
+        self,
+        model_path: str,
+        config: dict,
+        shared: OVSharedState | None,
+        infer_sem: threading.BoundedSemaphore | None,
+    ) -> None:
+        if shared is None:
+            # Single-worker mode: compile inline (no registry).
+            shared = self.load_shared_sync(model_path, config)
 
-        provider_options = config.get("provider_options", {})
-        device = str(provider_options.get("device", "CPU")).upper()
-        logger.info(
-            "Loading model %s on OpenVINO device %s.", model_path, device
-        )
+        # Borrow compiled model reference.
+        self._compiled = shared.compiled
+        self._model_info = shared.model_info
+        self._infer_sem = infer_sem
 
-        core = ov.Core()
-        model = core.read_model(model_path)
-        self._compiled = core.compile_model(model, device)
+        # Each worker gets its own InferRequest (not thread-safe to share).
         self._request = self._compiled.create_infer_request()
-        self._model_info = self._extract_model_info()
-        logger.info("OpenVINO model loaded: %s", self._model_info)
+        logger.info("OpenVINO worker ready (InferRequest created).")
 
     def _infer_sync(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         assert self._request is not None
         assert self._model_info is not None
-
-        self._request.infer({self._model_info.input_name: input_tensor})
-
+        if self._infer_sem is not None:
+            with self._infer_sem:
+                self._request.infer({self._model_info.input_name: input_tensor})
+        else:
+            self._request.infer({self._model_info.input_name: input_tensor})
         return [
             self._request.get_output_tensor(i).data.copy()
             for i in range(len(self._model_info.output_names))
@@ -152,11 +220,10 @@ class OpenVINOBackend(BaseBackend):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _extract_model_info(self) -> ModelInfo:
-        """Build ModelInfo from the compiled model's tensor metadata."""
-        assert self._compiled is not None
-
-        inp = self._compiled.input(0)
+    @staticmethod
+    def _extract_model_info(compiled) -> ModelInfo:
+        """Build ModelInfo from a compiled model's tensor metadata."""
+        inp = compiled.input(0)
         input_name = inp.any_name
         input_shape = _shape_to_list(inp.partial_shape)
         input_dtype = _OV_DTYPE_MAP.get(inp.element_type, "float32")
@@ -164,8 +231,8 @@ class OpenVINOBackend(BaseBackend):
         output_names: list[str] = []
         output_shapes: list[list[int]] = []
         output_dtypes: list[str] = []
-        for i in range(len(self._compiled.outputs)):
-            out = self._compiled.output(i)
+        for i in range(len(compiled.outputs)):
+            out = compiled.output(i)
             output_names.append(out.any_name)
             output_shapes.append(_shape_to_list(out.partial_shape))
             output_dtypes.append(_OV_DTYPE_MAP.get(out.element_type, "float32"))

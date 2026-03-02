@@ -10,6 +10,7 @@ import sys
 import threading
 
 from ..config.settings import AppConfig, load_config
+from ..model_manager.shared import SharedStateRegistry
 from .zmq_handler import AsyncZMQHandler
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,8 @@ def _run_worker(
     endpoint: str,
     coordinator: _WorkerCoordinator,
     worker_idx: int,
+    shared_registry: SharedStateRegistry | None,
+    infer_sem: threading.BoundedSemaphore | None,
 ) -> None:
     """Target function for each worker thread.
 
@@ -81,10 +84,22 @@ def _run_worker(
     concurrent.  The ZMQ REP socket inside each worker still maintains the
     strict send→recv ordering Frigate requires, but workers on different ports
     proceed independently.
+
+    *shared_registry* is shared across all workers; it ensures expensive
+    one-time backend initialisation (engine deserialisation, model compilation)
+    happens at most once.
+
+    *infer_sem* is a threading.BoundedSemaphore that limits concurrent hardware
+    inference calls across all workers.  None means unlimited.
     """
 
     async def _main() -> None:
-        handler = AsyncZMQHandler(config, endpoint=endpoint)
+        handler = AsyncZMQHandler(
+            config,
+            endpoint=endpoint,
+            shared_registry=shared_registry,
+            infer_sem=infer_sem,
+        )
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         assert task is not None
@@ -131,6 +146,18 @@ def _run_multi(config: AppConfig) -> None:
     num_workers = config.server.num_workers
     base_port = config.server.base_port
 
+    # Shared resources: one registry and one semaphore for all workers.
+    shared_registry = SharedStateRegistry()
+
+    max_concurrency = config.inference.max_inference_concurrency
+    infer_sem: threading.BoundedSemaphore | None = (
+        threading.BoundedSemaphore(max_concurrency) if max_concurrency > 0 else None
+    )
+    if infer_sem is not None:
+        logger.info("Inference semaphore: max_inference_concurrency=%d", max_concurrency)
+    else:
+        logger.info("Inference semaphore: unlimited (max_inference_concurrency=0)")
+
     coordinator = _WorkerCoordinator()
     threads: list[threading.Thread] = []
 
@@ -138,7 +165,7 @@ def _run_multi(config: AppConfig) -> None:
         endpoint = f"tcp://*:{base_port + i}"
         t = threading.Thread(
             target=_run_worker,
-            args=(config, endpoint, coordinator, i),
+            args=(config, endpoint, coordinator, i, shared_registry, infer_sem),
             name=f"condor-worker-{i}",
             daemon=True,
         )

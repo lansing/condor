@@ -34,6 +34,13 @@ inference:
   provider: "tensorrt"
   #provider_options:
   #  device: 0
+  # Maximum number of workers that may execute the hardware inference call
+  # (execute_v2 / session.run / request.infer) simultaneously.
+  # 0 = unlimited (default — suitable when the GPU has enough headroom).
+  # 1 = serialise inference calls; workers still pipeline H→D/D→H and
+  #     post-processing concurrently, so throughput improves vs. a single worker.
+  # N = allow up to N concurrent GPU kernel launches (MIG / powerful GPUs).
+  max_inference_concurrency: 1
 
   # --- ONNX examples ---
   #provider: "onnx"

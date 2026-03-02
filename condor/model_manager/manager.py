@@ -9,12 +9,25 @@ Responsibilities:
 
 An asyncio.Lock guards all load/unload operations so that concurrent model
 management messages cannot corrupt state.
+
+Shared-resource protocol
+------------------------
+When a SharedStateRegistry is supplied (multi-worker mode), load_model()
+calls backend.load_shared_sync() via the registry — ensuring that expensive
+one-time work (engine deserialisation, model compilation) happens at most once
+regardless of how many workers race to load simultaneously.  The resulting
+SharedBackendState is passed to backend.load() so each worker can set up its
+own per-worker resources (execution context, infer request, I/O buffers).
+
+In single-worker mode (no registry), backend.load() receives shared=None and
+is responsible for doing everything itself.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 
 import aiofiles
@@ -23,14 +36,23 @@ from ..backends.base import BaseBackend, ModelInfo
 from ..backends.onnx_backend import OnnxRuntimeBackend
 from ..backends.openvino_backend import OpenVINOBackend
 from ..backends.tensorrt_backend import TensorRTBackend
+from .shared import SharedStateRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class AsyncModelManager:
-    def __init__(self, models_dir: str, inference_config: dict) -> None:
+    def __init__(
+        self,
+        models_dir: str,
+        inference_config: dict,
+        shared_registry: SharedStateRegistry | None = None,
+        infer_sem: threading.BoundedSemaphore | None = None,
+    ) -> None:
         self.models_dir = Path(models_dir)
         self.inference_config = inference_config
+        self._shared_registry = shared_registry
+        self._infer_sem = infer_sem
 
         self._backend: BaseBackend | None = None
         self._active_model: str | None = None
@@ -71,6 +93,10 @@ class AsyncModelManager:
             return OnnxRuntimeBackend()
         return OnnxRuntimeBackend()
 
+    def _shared_key(self, model_path: str) -> str:
+        provider = self.inference_config.get("provider", "onnx").lower()
+        return f"{provider}:{model_path}"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -97,8 +123,14 @@ class AsyncModelManager:
 
         The lock ensures sequential load/unload even if multiple coroutines
         race to load at the same time.
+
+        When a SharedStateRegistry is present, expensive one-time resources
+        (engine deserialisation, model compilation) are loaded via the registry
+        and reused across all workers.
         """
+        logger.warning("load_model, entering lock")
         async with self._lock:
+            logger.warning("load_model, in lock")
             model_path = self.models_dir / model_name
             if not model_path.exists():
                 logger.error("Model file not found: %s", model_path)
@@ -118,12 +150,30 @@ class AsyncModelManager:
 
             try:
                 backend = self._make_backend()
-                await backend.load(str(model_path), self.inference_config)
+                shared = None
+
+                if self._shared_registry is not None:
+                    # Load shared resources via the registry (at most once per
+                    # model across all workers; subsequent workers get cached state).
+                    key = self._shared_key(str(model_path))
+                    shared = await asyncio.to_thread(
+                        self._shared_registry.get_or_load,
+                        key,
+                        lambda: backend.load_shared_sync(
+                            str(model_path), self.inference_config
+                        ),
+                    )
+
+                logger.warning("load_model, calling backend.load")
+                await backend.load(
+                    str(model_path),
+                    self.inference_config,
+                    shared=shared,
+                    infer_sem=self._infer_sem,
+                )
                 self._backend = backend
                 self._active_model = model_name
-                logger.info(
-                    "Model loaded: %s  info=%s", model_name, backend.model_info
-                )
+                logger.info("Model loaded: %s  info=%s", model_name, backend.model_info)
                 return True
             except Exception:
                 logger.exception("Failed to load model %s.", model_name)

@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 
 import numpy as np
 import zmq
@@ -34,6 +35,7 @@ import zmq.asyncio
 
 from ..config.settings import AppConfig
 from ..model_manager.manager import AsyncModelManager
+from ..model_manager.shared import SharedStateRegistry
 from ..post_process.yolov10 import YoloV10PostProcessor
 
 logger = logging.getLogger(__name__)
@@ -49,12 +51,21 @@ def _zeros_response() -> list[bytes]:
 class AsyncZMQHandler:
     """Async ZMQ REP socket + Frigate protocol dispatcher."""
 
-    def __init__(self, config: AppConfig, *, endpoint: str | None = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        endpoint: str | None = None,
+        shared_registry: SharedStateRegistry | None = None,
+        infer_sem: threading.BoundedSemaphore | None = None,
+    ) -> None:
         self.config = config
         self._endpoint = endpoint or config.server.endpoint
         self.manager = AsyncModelManager(
             models_dir=config.server.models_dir,
             inference_config=config.inference.model_dump(),
+            shared_registry=shared_registry,
+            infer_sem=infer_sem,
         )
         self.post_processor = YoloV10PostProcessor(
             confidence_threshold=config.post_process.confidence_threshold,

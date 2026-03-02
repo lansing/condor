@@ -19,6 +19,7 @@ class ServerConfig(BaseModel):
 class InferenceConfig(BaseModel):
     provider: str = "cpu"
     provider_options: dict[str, Any] = Field(default_factory=dict)
+    max_inference_concurrency: int = 0  # 0 = unlimited
 
 
 class PostProcessConfig(BaseModel):

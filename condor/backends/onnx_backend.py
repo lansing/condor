@@ -12,16 +12,30 @@ The provider is always ``"onnx"`` in config; the specific execution provider
 
 If ``execution_provider`` is specified it MUST be available; a RuntimeError is
 raised immediately if it is not, rather than silently falling back.
+
+Shared-resource model
+---------------------
+``ort.InferenceSession`` is documented as thread-safe for concurrent ``run()``
+calls (session state is read-only after creation; per-run buffers are
+thread-local inside ORT).  All workers therefore share one session, avoiding
+both the load time and memory cost of N independent sessions.
+
+``OnnxSharedState`` (created once in ``load_shared_sync()``) holds the session
+and the extracted ``ModelInfo``.  Each worker's ``load()`` borrows references
+from the shared state; ``cleanup()`` drops those references without destroying
+the session.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from dataclasses import dataclass
 
 import numpy as np
 
-from .base import ONNX_TYPE_TO_NUMPY, BaseBackend, ModelInfo
+from .base import ONNX_TYPE_TO_NUMPY, BaseBackend, ModelInfo, SharedBackendState
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +47,21 @@ except ImportError:
     ONNXRUNTIME_SUPPORT = False
 
 
+# ---------------------------------------------------------------------------
+# Shared state dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OnnxSharedState(SharedBackendState):
+    """Resources shared across all ORT worker instances for one model."""
+    session: object    # ort.InferenceSession (thread-safe for concurrent run())
+    model_info: ModelInfo
+
+
+# ---------------------------------------------------------------------------
+# OnnxRuntimeBackend
+# ---------------------------------------------------------------------------
+
 class OnnxRuntimeBackend(BaseBackend):
     """Async-wrapped ONNX Runtime inference backend.
 
@@ -43,36 +72,14 @@ class OnnxRuntimeBackend(BaseBackend):
     def __init__(self) -> None:
         self._session: ort.InferenceSession | None = None
         self._model_info: ModelInfo | None = None
+        self._infer_sem: threading.BoundedSemaphore | None = None
 
     # ------------------------------------------------------------------
-    # BaseBackend interface
+    # Shared-resource interface
     # ------------------------------------------------------------------
 
-    async def load(self, model_path: str, config: dict) -> None:
-        """Load model from *model_path* in a thread to avoid blocking the loop."""
-        await asyncio.to_thread(self._load_sync, model_path, config)
-
-    async def infer(self, input_tensor: np.ndarray) -> list[np.ndarray]:
-        """Run ONNX inference in a thread and return output tensor list."""
-        if self._session is None:
-            raise RuntimeError("Backend has no loaded model; call load() first.")
-        return await asyncio.to_thread(self._infer_sync, input_tensor)
-
-    async def cleanup(self) -> None:
-        """Release the ONNX session and model metadata."""
-        self._session = None
-        self._model_info = None
-        logger.info("OnnxRuntimeBackend cleaned up.")
-
-    @property
-    def model_info(self) -> ModelInfo | None:
-        return self._model_info
-
-    # ------------------------------------------------------------------
-    # Synchronous helpers (run inside thread-pool executor)
-    # ------------------------------------------------------------------
-
-    def _load_sync(self, model_path: str, config: dict) -> None:
+    def load_shared_sync(self, model_path: str, config: dict) -> OnnxSharedState:
+        """Create the ORT InferenceSession once, shared across all workers."""
         if not ONNXRUNTIME_SUPPORT:
             raise RuntimeError(
                 "onnxruntime is not installed. "
@@ -85,21 +92,76 @@ class OnnxRuntimeBackend(BaseBackend):
 
         providers = self._resolve_providers(requested_ep, device)
         logger.info(
-            "Loading ONNX model %s with providers %s",
+            "Creating shared ONNX session for %s with providers %s",
             model_path,
             providers if providers is not None else "(ORT defaults)",
         )
 
-        self._session = ort.InferenceSession(model_path, providers=providers)
-        self._model_info = self._extract_model_info()
-        logger.info("Model loaded successfully: %s", self._model_info)
-        # Log the providers that ORT actually activated (may differ from the
-        # requested list if some ops fell back to a lower-priority provider).
-        logger.info("Active session providers: %s", self._session.get_providers())
+        session = ort.InferenceSession(model_path, providers=providers)
+        logger.info("Active session providers: %s", session.get_providers())
+        model_info = self._extract_model_info(session)
+        logger.info("ONNX shared state ready: %s", model_info)
+        return OnnxSharedState(session=session, model_info=model_info)
+
+    # ------------------------------------------------------------------
+    # BaseBackend interface
+    # ------------------------------------------------------------------
+
+    async def load(
+        self,
+        model_path: str,
+        config: dict,
+        shared: SharedBackendState | None = None,
+        infer_sem: threading.BoundedSemaphore | None = None,
+    ) -> None:
+        """Borrow the shared session (or create one in single-worker mode)."""
+        await asyncio.to_thread(self._load_sync, model_path, config, shared, infer_sem)
+
+    async def infer(self, input_tensor: np.ndarray) -> list[np.ndarray]:
+        """Run ONNX inference in a thread and return output tensor list."""
+        if self._session is None:
+            raise RuntimeError("Backend has no loaded model; call load() first.")
+        return await asyncio.to_thread(self._infer_sync, input_tensor)
+
+    async def cleanup(self) -> None:
+        """Drop references to the shared session (does not destroy it)."""
+        self._session = None
+        self._model_info = None
+        logger.info("OnnxRuntimeBackend cleaned up.")
+
+    @property
+    def model_info(self) -> ModelInfo | None:
+        return self._model_info
+
+    # ------------------------------------------------------------------
+    # Synchronous helpers (run inside thread-pool executor)
+    # ------------------------------------------------------------------
+
+    def _load_sync(
+        self,
+        model_path: str,
+        config: dict,
+        shared: OnnxSharedState | None,
+        infer_sem: threading.BoundedSemaphore | None,
+    ) -> None:
+        if shared is None:
+            # Single-worker mode: create the session here (no registry).
+            shared = self.load_shared_sync(model_path, config)
+
+        # Borrow references; the SharedStateRegistry owns the OnnxSharedState.
+        self._session = shared.session
+        self._model_info = shared.model_info
+        self._infer_sem = infer_sem
+        logger.info("ORT worker ready (shared session attached).")
 
     def _infer_sync(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         assert self._session is not None
         assert self._model_info is not None
+        if self._infer_sem is not None:
+            with self._infer_sem:
+                return self._session.run(
+                    None, {self._model_info.input_name: input_tensor}
+                )
         return self._session.run(
             None, {self._model_info.input_name: input_tensor}
         )
@@ -160,13 +222,11 @@ class OnnxRuntimeBackend(BaseBackend):
         )
         return {"device": device}
 
-    def _extract_model_info(self) -> ModelInfo:
-        assert self._session is not None
-        inp = self._session.get_inputs()[0]
-        outputs = self._session.get_outputs()
-
+    @staticmethod
+    def _extract_model_info(session) -> ModelInfo:
+        inp = session.get_inputs()[0]
+        outputs = session.get_outputs()
         input_dtype = ONNX_TYPE_TO_NUMPY.get(inp.type, "float32")
-
         return ModelInfo(
             input_name=inp.name,
             input_shape=list(inp.shape),
