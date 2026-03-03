@@ -276,6 +276,36 @@ class StatsCollector:
             sum(workers_snap[w]["req_per_sec"] for w in workers_snap), 2
         )
 
+        # Compute global infer from per-worker windows
+        infer_stats = [
+            workers_snap[w]["infer_ms"]
+            for w in workers_snap
+            if workers_snap[w]["infer_ms"] is not None
+        ]
+        if infer_stats:
+            global_infer: dict[str, float] | None = {
+                "avg": round(sum(s["avg"] for s in infer_stats) / len(infer_stats), 2),
+                "min": round(min(s["min"] for s in infer_stats), 2),
+                "max": round(max(s["max"] for s in infer_stats), 2),
+            }
+        else:
+            global_infer = None
+
+        # Compute global postprocess from per-worker windows
+        pp_stats = [
+            workers_snap[w]["postprocess_ms"]
+            for w in workers_snap
+            if workers_snap[w]["postprocess_ms"] is not None
+        ]
+        if pp_stats:
+            global_pp: dict[str, float] | None = {
+                "avg": round(sum(s["avg"] for s in pp_stats) / len(pp_stats), 2),
+                "min": round(min(s["min"] for s in pp_stats), 2),
+                "max": round(max(s["max"] for s in pp_stats), 2),
+            }
+        else:
+            global_pp = None
+
         return {
             "config": cfg,
             "uptime_s": round(uptime, 1),
@@ -289,6 +319,8 @@ class StatsCollector:
             "global_trt_h2d_ms": self._trt_h2d.stats(),
             "global_trt_execute_ms": self._trt_execute.stats(),
             "global_trt_d2h_ms": self._trt_d2h.stats(),
+            "global_infer_ms": global_infer,
+            "global_postprocess_ms": global_pp,
             "sparkline_latency": list(self._sparkline_latency),
             "sparkline_throughput": list(self._sparkline_throughput),
         }

@@ -107,37 +107,22 @@ def get_bird_frame(frame_index: int) -> str:
 
 
 def build_combined_logo(condor_lines: list[str], provider_lines: list[str], bird_x: int | None = None, bird_y: int | None = None, bird_frame: int = 0) -> str:
-    """Combine CONDOR logo (left) and provider logo (right) into a single box with optional flying bird."""
-    # Get bird character if position is set
-    bird_str = ""
-    if bird_x is not None and bird_y is not None:
-        bird_str = get_bird_frame(bird_frame)
+    """Combine CONDOR logo (left) and provider logo (right) into a single box."""
+    # Fixed width for consistent layout
+    total_width = 90
+    condor_width = 54
 
-    # Calculate width needed
-    # CONDOR is ~50 chars, provider is ~28 chars, we need padding
     combined_lines = []
 
     for i in range(max(len(condor_lines), len(provider_lines))):
         condor_line = condor_lines[i] if i < len(condor_lines) else ""
         provider_line = provider_lines[i] if i < len(provider_lines) else ""
 
-        # Pad condor line to align provider on the right
-        # CONDOR_LOGO is ~51 chars wide, provider is ~25 chars
-        padding_width = 54
-        condor_padded = condor_line.ljust(padding_width)
+        # Left-align CONDOR, right-align provider
+        condor_padded = condor_line.ljust(condor_width)
+        provider_padded = provider_line.rjust(total_width - condor_width)
 
-        # Add gap between logos
-        gap = "  "
-        combined = condor_padded + gap + provider_line
-
-        # Insert bird only if it's positioned at this vertical level
-        # Bird flies in the gap between logos (or can be positioned elsewhere)
-        if bird_x is not None and bird_y is not None and i == bird_y:
-            bird_insert_pos = padding_width + bird_x
-            if bird_insert_pos + len(bird_str) <= len(combined):
-                combined_list = list(combined)
-                combined_list[bird_insert_pos:bird_insert_pos + len(bird_str)] = list(bird_str)
-                combined = "".join(combined_list)
+        combined = condor_padded + provider_padded
 
         combined_lines.append(combined)
 

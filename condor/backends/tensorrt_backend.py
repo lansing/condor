@@ -29,8 +29,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .base import BaseBackend, ModelInfo, SharedBackendState
 from ..telemetry import tel, tracer
+from .base import BaseBackend, ModelInfo, SharedBackendState
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +46,14 @@ try:
 except ImportError:
     TRT_SUPPORT = False
     trt = None  # type: ignore[assignment]
-    cu = None   # type: ignore[assignment]
+    cu = None  # type: ignore[assignment]
     _ILogger_base = object
 
 
 # ---------------------------------------------------------------------------
 # CUDA helpers
 # ---------------------------------------------------------------------------
+
 
 def _check(retval, op: str) -> None:
     """Raise RuntimeError on a non-zero CUDA result code."""
@@ -70,6 +71,7 @@ def _unwrap(retval, op: str):
 # ---------------------------------------------------------------------------
 # TrtLogger
 # ---------------------------------------------------------------------------
+
 
 class TrtLogger(_ILogger_base):
     """Bridges TensorRT log messages into Python's logging module."""
@@ -92,6 +94,7 @@ class TrtLogger(_ILogger_base):
 # ---------------------------------------------------------------------------
 # HostDeviceMem
 # ---------------------------------------------------------------------------
+
 
 class HostDeviceMem:
     """Paired page-locked host buffer and CUDA device buffer.
@@ -157,18 +160,21 @@ class HostDeviceMem:
 # Shared state dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TrtSharedState(SharedBackendState):
     """Resources shared across all TensorRT worker instances for one model."""
-    cu_device: object   # CUdevice handle
-    cu_ctx: object      # Primary CUDA context (cuDevicePrimaryCtxRetain)
-    engine: object      # trt.ICudaEngine (immutable, thread-safe)
+
+    cu_device: object  # CUdevice handle
+    cu_ctx: object  # Primary CUDA context (cuDevicePrimaryCtxRetain)
+    engine: object  # trt.ICudaEngine (immutable, thread-safe)
     model_info: ModelInfo
 
 
 # ---------------------------------------------------------------------------
 # Module-level helper
 # ---------------------------------------------------------------------------
+
 
 def _extract_model_info(engine) -> ModelInfo:
     """Build ModelInfo from a deserialised TRT engine's tensor metadata."""
@@ -206,6 +212,7 @@ def _extract_model_info(engine) -> ModelInfo:
 # ---------------------------------------------------------------------------
 # TensorRTBackend
 # ---------------------------------------------------------------------------
+
 
 class TensorRTBackend(BaseBackend):
     """Async-wrapped TensorRT inference backend.
@@ -245,11 +252,12 @@ class TensorRTBackend(BaseBackend):
 
     def __init__(self) -> None:
         # Shared (references only — do not own/destroy):
-        self._cu_ctx = None       # primary CUDA context
-        self._engine = None       # trt.ICudaEngine
+        self._cu_ctx = None  # primary CUDA context
+        self._engine = None  # trt.ICudaEngine
 
         # Per-worker (owned):
-        self._context = None      # trt.IExecutionContext
+        self._context = None  # trt.IExecutionContext
+        self._stream = None
         self._inputs: list[HostDeviceMem] = []
         self._outputs: list[HostDeviceMem] = []
         self._bindings: list[int] = []
@@ -274,9 +282,7 @@ class TensorRTBackend(BaseBackend):
             )
 
         device_idx = int(config.get("provider_options", {}).get("device", 0))
-        logger.info(
-            "Loading TRT shared resources on CUDA device %d.", device_idx
-        )
+        logger.info("Loading TRT shared resources on CUDA device %d.", device_idx)
 
         # 1. Init CUDA driver (idempotent).
         _check(cu.cuInit(0), "cuInit")
@@ -306,9 +312,7 @@ class TensorRTBackend(BaseBackend):
             try:
                 trt.init_libnvinfer_plugins(trt_logger, "")
             except OSError as exc:
-                logger.warning(
-                    "init_libnvinfer_plugins failed (non-fatal): %s", exc
-                )
+                logger.warning("init_libnvinfer_plugins failed (non-fatal): %s", exc)
 
             # 6. Deserialise engine.  Weight tensors are allocated in the
             #    primary context; all workers' execution contexts will share

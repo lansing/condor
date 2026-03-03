@@ -85,43 +85,17 @@ class HeaderWidget(Static):
         self._animation_tick = 0
 
     def on_mount(self) -> None:
-        """Start the animation loop."""
-        self._start_animation()
-
-    @work(exclusive=True)
-    async def _start_animation(self) -> None:
-        """Continuously animate the bird."""
-        while True:
-            self._animation_tick += 1
-
-            # Move bird every 2 frames
-            if self._animation_tick % 2 == 0:
-                self._bird_x += self._bird_x_direction
-                self._bird_y += self._bird_y_direction
-
-                # Bounce off edges
-                max_x = 20  # Bird moves in the gap between logos
-                max_y = 5
-                if self._bird_x <= 0 or self._bird_x >= max_x:
-                    self._bird_x_direction *= -1
-                if self._bird_y <= 0 or self._bird_y >= max_y:
-                    self._bird_y_direction *= -1
-
-            self.refresh()
-            await asyncio.sleep(0.05)  # ~20 FPS
+        """Animation disabled temporarily."""
+        pass
 
     def render(self) -> str:
         condor_lines = CONDOR_LOGO.split("\n")
         provider_lines = get_provider_logo(self.provider).split("\n")
 
-        bird_frame = (self._animation_tick // 3) % 4
-
+        # Bird animation disabled temporarily
         return build_combined_logo(
             condor_lines,
             provider_lines,
-            bird_x=self._bird_x,
-            bird_y=self._bird_y,
-            bird_frame=bird_frame,
         )
 
     def watch_provider(self) -> None:
@@ -243,27 +217,26 @@ class WorkerPanel(Static):
         d = self._data
         g = self._trt_data
 
-        req = d.get("requests_total", 0)
         inf = d.get("inference_total", 0)
         rps = d.get("req_per_sec", 0.0)
         e2e = d.get("e2e_ms")
-        infer = d.get("infer_ms")
-        pp = d.get("postprocess_ms")
         h2d = g.get("global_trt_h2d_ms")
+        sem = g.get("global_sem_wait_ms")
+        infer = d.get("infer_ms")
+        d2h = g.get("global_trt_d2h_ms")
+        pp = d.get("postprocess_ms")
 
         lines = [
-            f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]",
-            "─" * 80,
-            f"  Req   [green]{req:>7,}[/green]  [yellow]{rps:5.1f} rps[/yellow]",
-            f"  Infer [green]{inf:>7,}[/green]",
-            "─" * 80,
+            f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f} rps[/yellow]",
+            f"  Inf   [green]{inf:>7,}[/green]",
             "  [dim]          avg    min    max[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
+            f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
+            f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
             f"  Infer [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  D2H   [white]{_fmt_ms_row(d2h)}[/white] ms",
             f"  PostP [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
-        if h2d is not None:
-            lines.append(f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms")
         return "\n".join(lines)
 
 
@@ -296,38 +269,24 @@ class GlobalPanel(Static):
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
-        concurrent = d.get("inference_concurrent", 0)
         rps = d.get("global_throughput_rps", 0.0)
         e2e = d.get("global_e2e_ms")
-        sem = d.get("global_sem_wait_ms")
         h2d = d.get("global_trt_h2d_ms")
-        exe = d.get("global_trt_execute_ms")
+        sem = d.get("global_sem_wait_ms")
+        infer = d.get("global_infer_ms")
         d2h = d.get("global_trt_d2h_ms")
+        pp = d.get("global_postprocess_ms")
 
         lines = [
-            "[bold yellow]GLOBAL METRICS[/bold yellow]",
-            "─" * 80,
-            f"  Throughput [green]{rps:7.2f} rps[/green]",
-            f"  Concurrent [cyan]{concurrent:>4}[/cyan]",
-            "─" * 80,
+            f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
             "  [dim]          avg    min    max[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
+            f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
+            f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
+            f"  Infer [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  D2H   [white]{_fmt_ms_row(d2h)}[/white] ms",
+            f"  PostP [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
-
-        if sem is not None:
-            lines.append(f"  SemWait[white]{_fmt_ms_row(sem)}[/white] ms")
-
-        if h2d is not None or exe is not None:
-            lines += [
-                "─" * 80,
-                "  [bold magenta]TensorRT Timing[/bold magenta]",
-            ]
-            if h2d is not None:
-                lines.append(f"  H2D    [white]{_fmt_ms_row(h2d)}[/white] ms")
-            if exe is not None:
-                lines.append(f"  Execute[white]{_fmt_ms_row(exe)}[/white] ms")
-            if d2h is not None:
-                lines.append(f"  D2H    [white]{_fmt_ms_row(d2h)}[/white] ms")
 
         return "\n".join(lines)
 
