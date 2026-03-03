@@ -49,13 +49,13 @@ RUN if [ "$ONNX_PACKAGE" != "onnxruntime" ]; then \
     fi
 
 # Install dependencies into a local venv
-RUN uv sync --no-dev --no-install-project
+RUN uv sync --no-dev --no-install-project --extra tui
 
 # Copy the rest of the project
 COPY condor/ ./condor/
 
 # Install the project itself
-RUN uv sync --no-dev
+RUN uv sync --no-dev --extra tui
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime

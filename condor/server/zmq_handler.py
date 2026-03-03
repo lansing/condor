@@ -284,7 +284,8 @@ class AsyncZMQHandler:
 
             infer_duration_ms = (time.perf_counter() - t_infer) * 1000
             tel.record_inference_duration(
-                infer_duration_ms, provider=provider, model_name=model_name
+                infer_duration_ms, provider=provider, model_name=model_name,
+                worker_id=self._worker_id,
             )
             tel.count_inference(
                 worker_id=self._worker_id, model_name=model_name,
@@ -316,6 +317,7 @@ class AsyncZMQHandler:
             tel.record_postprocess_duration(
                 (time.perf_counter() - t_pp) * 1000,
                 post_processor=type(self.post_processor).__name__,
+                worker_id=self._worker_id,
             )
 
         resp_header = {"shape": list(result.shape), "dtype": "float32"}

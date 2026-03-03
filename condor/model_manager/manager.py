@@ -205,6 +205,7 @@ class AsyncModelManager:
                     self._active_model = model_name
                     logger.info("Model loaded: %s  info=%s", model_name, backend.model_info)
                     tel.count_model_load(model_name=model_name, provider=provider, status="ok")
+                    tel.set_active_model(model_name)
                     return True
                 except Exception:
                     logger.exception("Failed to load model %s.", model_name)

@@ -1,0 +1,52 @@
+# Condor — TensorRT backend
+#
+# Mirrors: make docker-run-tensorrt
+# Requires: NVIDIA driver on the host + Docker with NVIDIA Container Toolkit.
+# NEVER run without the nvidia runtime.  NEVER install TensorRT on the host.
+#
+# Usage:
+#   docker compose up            # foreground
+#   docker compose up -d         # detached
+#   docker compose down
+#
+# Multi-worker: set num_workers in config/config.yaml and uncomment
+# the matching port entries below.
+#
+# Metrics TUI (two options — pick one):
+#
+#   Option A — TUI inside the container (zero extra setup):
+#     docker compose exec condor condor-tui
+#     make tui-docker
+#
+#   Option B — TUI on the host (reads socket from bind-mount below):
+#     make install-tui   # first time
+#     make tui-host
+#     # or: CONDOR_STATS_SOCKET=run/metrics.sock condor-tui
+
+services:
+    condor:
+        image: condor:tensorrt
+        build:
+            context: ./
+            dockerfile: docker/tensorrt/Dockerfile
+        restart: "no"
+        runtime: nvidia
+        ports:
+            - "5555:5555"
+            # Uncomment for num_workers: 2
+            - "5556:5556"
+            # Uncomment for num_workers: 3
+            # - "5557:5557"
+            # Uncomment for num_workers: 4
+            # - "5558:5558"
+            # Uncomment for num_workers: 5
+            # - "5559:5559"
+        environment:
+            # Stats socket is placed in a bind-mounted dir so the host TUI
+            # can connect without entering the container.
+            CONDOR_STATS_SOCKET: /run/condor/metrics.sock
+        volumes:
+            - ./models:/app/models
+            - ./config:/app/config
+            # Socket directory — exposes metrics to the host at ./run/metrics.sock
+            - ./run:/run/condor

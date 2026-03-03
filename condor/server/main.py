@@ -11,7 +11,8 @@ import threading
 
 from ..config.settings import AppConfig, load_config
 from ..model_manager.shared import SharedStateRegistry
-from ..telemetry import setup_telemetry
+from ..stats import StatsServer
+from ..telemetry import setup_telemetry, tel
 from .zmq_handler import AsyncZMQHandler
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,16 @@ def main() -> None:
     config = load_config(args.config)
     _setup_logging(config.logging.level)
     setup_telemetry(config.observability)
+
+    # Configure and start the stats socket server (feeds the TUI).
+    # Always runs regardless of observability mode.
+    tel.stats.configure(
+        provider=config.inference.provider,
+        num_workers=config.server.num_workers,
+        base_port=config.server.base_port,
+    )
+    stats_server = StatsServer(tel.stats)
+    stats_server.start()
 
     if config.server.num_workers > 1:
         _run_multi(config)

@@ -66,6 +66,9 @@ post_process:
 # ── Observability (OpenTelemetry traces + metrics) ──────────────────────────
 # Set enabled: true to activate.  mode controls where data goes:
 #
+#   "tui"        — Stats socket only; no console/Prometheus/OTLP output.
+#                  Run condor-tui on the host or: make tui-host / make tui-docker
+#
 #   "console"    — spans (optional) + metric snapshot to stdout every N seconds.
 #                  Zero extra software needed.
 #
@@ -77,15 +80,17 @@ post_process:
 #                  Requires: make install-observability-otlp
 #                  Self-hosted HyperDX: docker run -p 8080:8080 -p 4318:4318 hyperdx/hyperdx-local
 #
+# All modes feed the stats socket, so condor-tui always works regardless of mode.
+#
 observability:
   enabled: true
-  mode: "console"           # console | prometheus | otlp
+  mode: "tui"               # tui | console | prometheus | otlp
   service_name: "condor"
   service_version: "0.1.0"
 #
 #   # Console mode settings:
-  console:
-    metrics_interval_seconds: 30   # Print metric snapshot every N seconds
+#  console:
+#   metrics_interval_seconds: 30   # Print metric snapshot every N seconds
 #     export_traces: false           # Also print individual spans as JSON (verbose)
 #
 #   # Prometheus mode settings:

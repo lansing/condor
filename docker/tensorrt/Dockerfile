@@ -59,11 +59,11 @@ COPY pyproject.toml ./
 # No lockfile is used here because pyproject.toml is modified above; uv will
 # resolve and pin a fresh lockfile inside the build context.
 RUN sed -i '/"onnxruntime>=/d' pyproject.toml \
-    && uv sync --no-dev --no-install-project
+    && uv sync --no-dev --no-install-project --extra tui
 
 # Copy application code and install the condor package itself.
 COPY condor/ ./condor/
-RUN uv sync --no-dev
+RUN uv sync --no-dev --extra tui
 
 # Default config (override at runtime with -v /path/to/config:/app/config).
 RUN mkdir -p /app/config /app/models

@@ -36,3 +36,6 @@ build/
 
 # uv
 uv.lock
+
+# Stats socket bind-mount dir (created by docker compose, contains metrics.sock)
+run/

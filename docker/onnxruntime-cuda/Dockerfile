@@ -53,11 +53,11 @@ COPY pyproject.toml uv.lock* ./
 RUN sed -i 's|"onnxruntime>=.*"|"onnxruntime-gpu>=1.19"|g' pyproject.toml
 
 # Install dependencies into a local venv.
-RUN uv sync --no-dev --no-install-project
+RUN uv sync --no-dev --no-install-project --extra tui
 
 # Copy the rest of the project and install it.
 COPY condor/ ./condor/
-RUN uv sync --no-dev
+RUN uv sync --no-dev --extra tui
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 # onnxruntime-gpu bundles CUDA 12.x runtime libs in the wheel (libcudart,

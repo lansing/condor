@@ -35,6 +35,11 @@ observability-local = [
 observability-otlp = [
     "opentelemetry-exporter-otlp-proto-http>=1.27",
 ]
+# Terminal metrics TUI (condor-tui command).
+# Install with: uv sync --extra tui
+tui = [
+    "textual>=0.70.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -42,6 +47,7 @@ dev = [
 
 [project.scripts]
 condor = "condor.server.main:main"
+condor-tui = "condor.tui.app:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -5,7 +5,8 @@
         docker-build-tensorrt docker-rebuild-tensorrt \
         docker-run-tensorrt docker-shell-tensorrt docker-test-tensorrt \
         install-openvino install-onnxruntime-openvino \
-        install-observability-local install-observability-otlp
+        install-observability-local install-observability-otlp \
+        install-tui run-tui tui-host tui-docker
 
 CONFIG ?= config/config.yaml
 
@@ -49,6 +50,27 @@ install-observability-local:
 # After installing, set observability.mode: "otlp" in config.yaml.
 install-observability-otlp:
 	uv sync --extra observability-otlp
+
+# ── Metrics TUI ─────────────────────────────────────────────────────────────────
+
+# Install Textual and register the condor-tui entry point.
+install-tui:
+	uv sync --extra tui
+
+# Launch the TUI against a locally-running server (native uv run).
+# Socket: /tmp/condor-metrics.sock  (default, override with CONDOR_STATS_SOCKET=...).
+run-tui:
+	uv run condor-tui
+
+# Launch the TUI on the HOST, reading the socket exposed by docker compose
+# via the bind-mount at ./run/metrics.sock.  Requires: make install-tui.
+tui-host:
+	CONDOR_STATS_SOCKET=run/metrics.sock uv run condor-tui
+
+# Launch the TUI INSIDE the running Docker Compose container.
+# No extra installs needed — condor-tui is already in the image.
+tui-docker:
+	docker compose exec condor condor-tui
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 

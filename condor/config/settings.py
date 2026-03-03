@@ -55,9 +55,11 @@ class OtlpObservabilityConfig(BaseModel):
 
 class ObservabilityConfig(BaseModel):
     enabled: bool = False
+    # "tui"        — stats socket only; no console/Prometheus/OTLP output.
     # "console"    — spans + metrics summary printed to stdout (zero extra software).
     # "prometheus" — Prometheus scrape endpoint at http://host:port/metrics.
     # "otlp"       — export traces + metrics via OTLP to HyperDX, Grafana, etc.
+    # All modes feed the stats socket (condor-tui always works).
     mode: str = "console"
     service_name: str = "condor"
     service_version: str = "0.1.0"

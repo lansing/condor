@@ -36,13 +36,13 @@ ENV PATH="/root/.local/bin:$PATH"
 COPY pyproject.toml uv.lock* ./
 
 # Install core + openvino extra into a local venv
-RUN uv sync --no-dev --no-install-project --extra openvino
+RUN uv sync --no-dev --no-install-project --extra openvino --extra tui
 
 # Copy the rest of the project
 COPY condor/ ./condor/
 
 # Install the project itself
-RUN uv sync --no-dev --extra openvino
+RUN uv sync --no-dev --extra openvino --extra tui
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
