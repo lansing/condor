@@ -166,19 +166,17 @@ class OnnxRuntimeBackend(BaseBackend):
             with tracer.start_as_current_span("condor.infer_sem.wait"):
                 self._infer_sem.acquire()
             tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
-            try:
-                with tracer.start_as_current_span("condor.onnx.run"):
-                    result = self._session.run(
-                        None, {self._model_info.input_name: input_tensor}
-                    )
-            finally:
+        tel.inc_inference_concurrent()
+        try:
+            with tracer.start_as_current_span("condor.onnx.run"):
+                result = self._session.run(
+                    None, {self._model_info.input_name: input_tensor}
+                )
+        finally:
+            tel.dec_inference_concurrent()
+            if self._infer_sem is not None:
                 self._infer_sem.release()
-            return result
-
-        with tracer.start_as_current_span("condor.onnx.run"):
-            return self._session.run(
-                None, {self._model_info.input_name: input_tensor}
-            )
+        return result
 
     # ------------------------------------------------------------------
     # Internal helpers

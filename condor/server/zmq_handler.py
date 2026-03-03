@@ -269,7 +269,6 @@ class AsyncZMQHandler:
             # --- inference ---
             infer_span.set_attribute("input_shape", str(shape))
             t_infer = time.perf_counter()
-            tel.inc_inference_concurrent()
             try:
                 outputs = await backend.infer(tensor)
             except Exception:
@@ -279,8 +278,6 @@ class AsyncZMQHandler:
                     provider=provider, status="error",
                 )
                 return _zeros_response()
-            finally:
-                tel.dec_inference_concurrent()
 
             infer_duration_ms = (time.perf_counter() - t_infer) * 1000
             tel.record_inference_duration(

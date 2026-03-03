@@ -451,6 +451,10 @@ class TensorRTBackend(BaseBackend):
                 with tracer.start_as_current_span("condor.infer_sem.wait"):
                     self._infer_sem.acquire()
                 tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
+            # inc_inference_concurrent brackets only the compute step so the
+            # TUI "concurrent" gauge accurately reflects GPU utilisation
+            # (≤ max_inference_concurrency), not the wider H→D/D→H pipeline.
+            tel.inc_inference_concurrent()
             try:
                 t_exec = time.perf_counter()
                 with tracer.start_as_current_span("condor.trt.execute"):
@@ -461,6 +465,7 @@ class TensorRTBackend(BaseBackend):
                         "TRT execute_v2 returned False — output may be invalid."
                     )
             finally:
+                tel.dec_inference_concurrent()
                 if self._infer_sem is not None:
                     self._infer_sem.release()
 

@@ -178,7 +178,7 @@ class _Tel:
         )
         self._inference_concurrent = meter.create_up_down_counter(
             "condor.inference.concurrent",
-            description="Number of inflight backend.infer() calls across all workers",
+            description="Number of GPU/compute calls currently executing (≤ max_inference_concurrency)",
         )
 
     # ------------------------------------------------------------------

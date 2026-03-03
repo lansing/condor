@@ -214,14 +214,14 @@ class OpenVINOBackend(BaseBackend):
             with tracer.start_as_current_span("condor.infer_sem.wait"):
                 self._infer_sem.acquire()
             tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
-            try:
-                with tracer.start_as_current_span("condor.ov.infer"):
-                    self._request.infer({self._model_info.input_name: input_tensor})
-            finally:
-                self._infer_sem.release()
-        else:
+        tel.inc_inference_concurrent()
+        try:
             with tracer.start_as_current_span("condor.ov.infer"):
                 self._request.infer({self._model_info.input_name: input_tensor})
+        finally:
+            tel.dec_inference_concurrent()
+            if self._infer_sem is not None:
+                self._infer_sem.release()
 
         return [
             self._request.get_output_tensor(i).data.copy()
