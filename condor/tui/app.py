@@ -222,7 +222,7 @@ class WorkerPanel(Static):
         mcpy = g.get("global_trt_host_copy_ms")
         h2d = g.get("global_trt_h2d_ms")
         sem = g.get("global_sem_wait_ms")
-        infer = d.get("infer_ms")
+        infer = g.get("global_trt_execute_ms")
         d2h = g.get("global_trt_d2h_ms")
         pp = d.get("postprocess_ms")
 
@@ -275,7 +275,7 @@ class GlobalPanel(Static):
         mcpy = d.get("global_trt_host_copy_ms")
         h2d = d.get("global_trt_h2d_ms")
         sem = d.get("global_sem_wait_ms")
-        infer = d.get("global_infer_ms")
+        infer = d.get("global_trt_execute_ms")
         d2h = d.get("global_trt_d2h_ms")
         pp = d.get("global_postprocess_ms")
 
