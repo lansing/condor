@@ -409,7 +409,15 @@ class TensorRTBackend(BaseBackend):
                 raise RuntimeError(
                     "TRT engine.create_execution_context() returned None."
                 )
+            err, self._stream = cu.cuStreamCreate(0)
+            _check(err, "cuStreamCreate")
             self._inputs, self._outputs, self._bindings = self._allocate_buffers()
+
+            for i in range(self._engine.num_io_tensors):
+                name = self._engine.get_tensor_name(i)
+                # self._bindings[i] holds the device pointer (int)
+                ptr = self._bindings[i]
+                self._context.set_tensor_address(name, ptr)
         finally:
             cu.cuCtxPopCurrent()
 
@@ -436,12 +444,13 @@ class TensorRTBackend(BaseBackend):
                 h2d_span.set_attribute("bytes_transferred", self._inputs[0]._nbytes)
                 np.copyto(self._inputs[0].host, input_tensor.ravel())
                 _check(
-                    cu.cuMemcpyHtoD(
+                    cu.cuMemcpyHtoDAsync(
                         self._inputs[0].device,
                         self._inputs[0]._host_ptr,
                         self._inputs[0]._nbytes,
+                        self._stream,
                     ),
-                    "cuMemcpyHtoD",
+                    "cuMemcpyHtoDAsync",
                 )
             tel.record_trt_h2d((time.perf_counter() - t_h2d) * 1000)
 
@@ -462,7 +471,8 @@ class TensorRTBackend(BaseBackend):
             try:
                 t_exec = time.perf_counter()
                 with tracer.start_as_current_span("condor.trt.execute"):
-                    ok = self._context.execute_v2(self._bindings)
+                    ok = self._context.execute_async_v3(int(self._stream))
+                    # ok = self._context.execute_async_v3(stream_handle=int(self._stream))
                 tel.record_trt_execute((time.perf_counter() - t_exec) * 1000)
                 if not ok:
                     logger.warning(
@@ -479,14 +489,16 @@ class TensorRTBackend(BaseBackend):
             with tracer.start_as_current_span("condor.trt.d2h_copy"):
                 for out in self._outputs:
                     _check(
-                        cu.cuMemcpyDtoH(
-                            out._host_ptr,
-                            out.device,
-                            out._nbytes,
+                        cu.cuMemcpyDtoHAsync(
+                            out._host_ptr, out.device, out._nbytes, self._stream
                         ),
-                        "cuMemcpyDtoH",
+                        "cuMemcpyDtoHAsync",
                     )
             tel.record_trt_d2h((time.perf_counter() - t_d2h) * 1000)
+
+            t_sync = time.perf_counter()
+            _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize")
+            tel.record_sync(((time.perf_counter() - t_sync) * 1000))
 
         finally:
             # 5. Always pop the context, even on error.
@@ -507,6 +519,10 @@ class TensorRTBackend(BaseBackend):
                     # Setting to None triggers Python GC → TRT destructor while
                     # the primary context is pushed, as required.
                     self._context = None
+
+                    if self._stream is not None:
+                        cu.cuStreamDestroy(self._stream)
+                        self._stream = None
 
                     # Explicitly free I/O buffers while context is active.
                     for buf in (*self._outputs, *self._inputs):

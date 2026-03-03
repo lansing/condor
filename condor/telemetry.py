@@ -48,7 +48,9 @@ logger = logging.getLogger(__name__)
 # whichever TracerProvider is registered at the time of each span operation.
 # It is safe to obtain this at import time — it will use the real provider
 # after setup_telemetry() calls trace.set_tracer_provider().
-tracer = trace.get_tracer("condor", schema_url="https://opentelemetry.io/schemas/1.27.0")
+tracer = trace.get_tracer(
+    "condor", schema_url="https://opentelemetry.io/schemas/1.27.0"
+)
 
 # Re-export for convenience so callers only import from condor.telemetry
 __all__ = ["tracer", "tel", "StatusCode", "setup_telemetry"]
@@ -57,6 +59,7 @@ __all__ = ["tracer", "tel", "StatusCode", "setup_telemetry"]
 # ---------------------------------------------------------------------------
 # Metric instruments container
 # ---------------------------------------------------------------------------
+
 
 class _Tel:
     """Null-safe container for all OTel metric instruments.
@@ -191,11 +194,14 @@ class _Tel:
     def count_request(self, *, worker_id: int, request_type: str, status: str) -> None:
         self.stats.count_request(worker_id)
         if self._req_ctr is not None:
-            self._req_ctr.add(1, {
-                "worker_id": str(worker_id),
-                "request_type": request_type,
-                "status": status,
-            })
+            self._req_ctr.add(
+                1,
+                {
+                    "worker_id": str(worker_id),
+                    "request_type": request_type,
+                    "status": status,
+                },
+            )
 
     def count_inference(
         self, *, worker_id: int, model_name: str, provider: str, status: str
@@ -203,38 +209,52 @@ class _Tel:
         if status == "ok":
             self.stats.count_inference(worker_id)
         if self._infer_ctr is not None:
-            self._infer_ctr.add(1, {
-                "worker_id": str(worker_id),
-                "model_name": model_name,
-                "provider": provider,
-                "status": status,
-            })
+            self._infer_ctr.add(
+                1,
+                {
+                    "worker_id": str(worker_id),
+                    "model_name": model_name,
+                    "provider": provider,
+                    "status": status,
+                },
+            )
 
     def count_dtype_mismatch(self, *, expected: str, received: str) -> None:
         if self._dtype_mismatch_ctr is not None:
-            self._dtype_mismatch_ctr.add(1, {"expected": expected, "received": received})
+            self._dtype_mismatch_ctr.add(
+                1, {"expected": expected, "received": received}
+            )
 
     def count_model_load(self, *, model_name: str, provider: str, status: str) -> None:
         if self._model_load_ctr is not None:
-            self._model_load_ctr.add(1, {
-                "model_name": model_name,
-                "provider": provider,
-                "status": status,
-            })
+            self._model_load_ctr.add(
+                1,
+                {
+                    "model_name": model_name,
+                    "provider": provider,
+                    "status": status,
+                },
+            )
 
     def count_cache_hit(self, *, provider: str, model_name: str) -> None:
         if self._shared_cache_hit_ctr is not None:
-            self._shared_cache_hit_ctr.add(1, {
-                "provider": provider,
-                "model_name": model_name,
-            })
+            self._shared_cache_hit_ctr.add(
+                1,
+                {
+                    "provider": provider,
+                    "model_name": model_name,
+                },
+            )
 
     def count_cache_miss(self, *, provider: str, model_name: str) -> None:
         if self._shared_cache_miss_ctr is not None:
-            self._shared_cache_miss_ctr.add(1, {
-                "provider": provider,
-                "model_name": model_name,
-            })
+            self._shared_cache_miss_ctr.add(
+                1,
+                {
+                    "provider": provider,
+                    "model_name": model_name,
+                },
+            )
 
     # ------------------------------------------------------------------
     # Histogram helpers
@@ -246,10 +266,13 @@ class _Tel:
         if request_type == "inference":
             self.stats.record_e2e(worker_id, ms)
         if self._req_hist is not None:
-            self._req_hist.record(ms, {
-                "worker_id": str(worker_id),
-                "request_type": request_type,
-            })
+            self._req_hist.record(
+                ms,
+                {
+                    "worker_id": str(worker_id),
+                    "request_type": request_type,
+                },
+            )
 
     def record_inference_duration(
         self, ms: float, *, provider: str, model_name: str, worker_id: int | None = None
@@ -257,10 +280,13 @@ class _Tel:
         if worker_id is not None:
             self.stats.record_infer(worker_id, ms)
         if self._infer_hist is not None:
-            self._infer_hist.record(ms, {
-                "provider": provider,
-                "model_name": model_name,
-            })
+            self._infer_hist.record(
+                ms,
+                {
+                    "provider": provider,
+                    "model_name": model_name,
+                },
+            )
 
     def record_trt_h2d(self, ms: float) -> None:
         self.stats.record_trt_h2d(ms)
@@ -293,6 +319,11 @@ class _Tel:
     def record_model_lock_wait(self, ms: float) -> None:
         if self._model_lock_wait_hist is not None:
             self._model_lock_wait_hist.record(ms)
+
+    def record_sync(self, ms: float) -> None:
+        # TODO implement me: record stat and also hist
+        # report those
+        pass
 
     # ------------------------------------------------------------------
     # UpDownCounter helpers
@@ -327,6 +358,7 @@ tel = _Tel()
 # Context manager helpers
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
 def timed_span(name: str, **attrs: object) -> Generator[trace.Span, None, None]:
     """Start a span, set attributes, and yield it.
@@ -348,6 +380,7 @@ def timed_span(name: str, **attrs: object) -> Generator[trace.Span, None, None]:
 # Provider setup
 # ---------------------------------------------------------------------------
 
+
 def setup_telemetry(config: ObservabilityConfig) -> None:
     """Configure OTel providers based on *config*.
 
@@ -361,10 +394,12 @@ def setup_telemetry(config: ObservabilityConfig) -> None:
 
     from opentelemetry.sdk.resources import Resource
 
-    resource = Resource.create({
-        "service.name": config.service_name,
-        "service.version": config.service_version,
-    })
+    resource = Resource.create(
+        {
+            "service.name": config.service_name,
+            "service.version": config.service_version,
+        }
+    )
 
     mode = config.mode
     if mode == "tui":
@@ -456,6 +491,7 @@ def _setup_prometheus(config: ObservabilityConfig, resource: object) -> None:
     # Start the HTTP server for Prometheus scraping.
     try:
         from prometheus_client import start_http_server
+
         start_http_server(port=config.prometheus.port, addr=config.prometheus.host)
         logger.info(
             "Prometheus metrics available at http://%s:%d/metrics",
