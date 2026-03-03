@@ -268,10 +268,11 @@ class TensorRTBackend(BaseBackend):
         # CUDA timing events (owned, created in _load_sync, destroyed in _cleanup_sync).
         # Bracketing H2D / execute / D2H on the stream gives accurate GPU-side latency
         # even with execute_async_v3, whose API call returns before the GPU is done.
-        self._ev_start = None      # recorded just before H2D async
-        self._ev_h2d_done = None   # recorded just after H2D async
-        self._ev_exec_done = None  # recorded just after execute_async_v3
-        self._ev_d2h_done = None   # recorded just after D2H async
+        self._ev_start = None       # recorded just before H2D async
+        self._ev_h2d_done = None    # recorded just after H2D async
+        self._ev_exec_start = None  # recorded after sem acquire, before execute_async_v3
+        self._ev_exec_done = None   # recorded just after execute_async_v3
+        self._ev_d2h_done = None    # recorded just after D2H async
 
     # ------------------------------------------------------------------
     # Shared-resource interface
@@ -430,6 +431,7 @@ class TensorRTBackend(BaseBackend):
             # Create timing events (CU_EVENT_DEFAULT = 0 enables timing).
             self._ev_start = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
             self._ev_h2d_done = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
+            self._ev_exec_start = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
             self._ev_exec_done = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
             self._ev_d2h_done = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
         finally:
@@ -442,11 +444,12 @@ class TensorRTBackend(BaseBackend):
         _check(cu.cuCtxPushCurrent(self._cu_ctx), "cuCtxPushCurrent")
         try:
             # 2. CPU-side staging copy: ravel + copyto into pinned host buffer.
-            #    This is pure CPU work and measured separately from the DMA.
-            t_host_copy = time.perf_counter()
+            #    Measured separately from DMA; combined with output copy below
+            #    into a single "host copy" metric per inference.
+            t_input_copy = time.perf_counter()
             with tracer.start_as_current_span("condor.trt.host_copy"):
                 np.copyto(self._inputs[0].host, input_tensor.ravel())
-            tel.record_trt_host_copy((time.perf_counter() - t_host_copy) * 1000)
+            input_copy_ms = (time.perf_counter() - t_input_copy) * 1000
 
             # 3. H→D DMA (async on our stream).
             #    Record ev_start before the DMA is queued so the GPU-side elapsed
@@ -480,6 +483,10 @@ class TensorRTBackend(BaseBackend):
 
             tel.inc_inference_concurrent()
             try:
+                # Record ev_exec_start *after* the semaphore is held so that
+                # cuEventElapsedTime(ev_exec_start, ev_exec_done) measures only
+                # GPU graph execution, not GPU idle time during sem wait.
+                _check(cu.cuEventRecord(self._ev_exec_start, self._stream), "cuEventRecord:exec_start")
                 with tracer.start_as_current_span("condor.trt.execute"):
                     ok = self._context.execute_async_v3(int(self._stream))
                 _check(cu.cuEventRecord(self._ev_exec_done, self._stream), "cuEventRecord:exec_done")
@@ -508,14 +515,29 @@ class TensorRTBackend(BaseBackend):
             # 6. Final sync — wait for D→H DMA to complete before reading host buffers.
             _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize:d2h")
 
-            # 7. Compute GPU-side elapsed times from CUDA events.
-            #    cuEventElapsedTime returns milliseconds.
+            # 7. Output copy/reshape: pinned host → new numpy array.
+            #    Timed and combined with the input staging copy so the MCpy
+            #    metric covers all CPU host-memory copies per inference.
+            t_output_copy = time.perf_counter()
+            with tracer.start_as_current_span("condor.trt.output_copy"):
+                outputs = [
+                    out.host.copy().reshape(shape)
+                    for out, shape in zip(self._outputs, self._model_info.output_shapes)
+                ]
+            output_copy_ms = (time.perf_counter() - t_output_copy) * 1000
+
+            # Combined host-copy metric (input staging + output copy).
+            tel.record_trt_host_copy(input_copy_ms + output_copy_ms)
+
+            # 8. Compute GPU-side elapsed times from CUDA events.
+            #    exec_ms uses ev_exec_start (recorded after sem acquire) so it
+            #    reflects pure graph execution, not GPU idle during sem wait.
             h2d_ms = _unwrap(
                 cu.cuEventElapsedTime(self._ev_start, self._ev_h2d_done),
                 "cuEventElapsedTime:h2d",
             )
             exec_ms = _unwrap(
-                cu.cuEventElapsedTime(self._ev_h2d_done, self._ev_exec_done),
+                cu.cuEventElapsedTime(self._ev_exec_start, self._ev_exec_done),
                 "cuEventElapsedTime:exec",
             )
             d2h_ms = _unwrap(
@@ -527,14 +549,10 @@ class TensorRTBackend(BaseBackend):
             tel.record_trt_d2h(d2h_ms)
 
         finally:
-            # 8. Always pop the context, even on error.
+            # 9. Always pop the context, even on error.
             cu.cuCtxPopCurrent()
 
-        # 6. Return copies of output buffers reshaped to their declared shapes.
-        return [
-            out.host.copy().reshape(shape)
-            for out, shape in zip(self._outputs, self._model_info.output_shapes)
-        ]
+        return outputs
 
     def _cleanup_sync(self) -> None:
         if self._cu_ctx is not None:
@@ -551,10 +569,12 @@ class TensorRTBackend(BaseBackend):
                         self._stream = None
 
                     # Destroy timing events.
-                    for ev in (self._ev_start, self._ev_h2d_done, self._ev_exec_done, self._ev_d2h_done):
+                    for ev in (self._ev_start, self._ev_h2d_done, self._ev_exec_start,
+                               self._ev_exec_done, self._ev_d2h_done):
                         if ev is not None:
                             cu.cuEventDestroy(ev)
-                    self._ev_start = self._ev_h2d_done = self._ev_exec_done = self._ev_d2h_done = None
+                    self._ev_start = self._ev_h2d_done = self._ev_exec_start = None
+                    self._ev_exec_done = self._ev_d2h_done = None
 
                     # Explicitly free I/O buffers while context is active.
                     for buf in (*self._outputs, *self._inputs):

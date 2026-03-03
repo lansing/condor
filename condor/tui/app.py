@@ -234,7 +234,7 @@ class WorkerPanel(Static):
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
             f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
-            f"  Infer [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  Exec  [white]{_fmt_ms_row(infer)}[/white] ms",
             f"  D2H   [white]{_fmt_ms_row(d2h)}[/white] ms",
             f"  PostP [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
@@ -286,7 +286,7 @@ class GlobalPanel(Static):
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
             f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
-            f"  Infer [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  Exec  [white]{_fmt_ms_row(infer)}[/white] ms",
             f"  D2H   [white]{_fmt_ms_row(d2h)}[/white] ms",
             f"  PostP [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
