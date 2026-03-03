@@ -220,6 +220,7 @@ class WorkerPanel(Static):
         inf = d.get("inference_total", 0)
         rps = d.get("req_per_sec", 0.0)
         e2e = d.get("e2e_ms")
+        mcpy = g.get("global_trt_host_copy_ms")
         h2d = g.get("global_trt_h2d_ms")
         sem = g.get("global_sem_wait_ms")
         infer = d.get("infer_ms")
@@ -231,6 +232,7 @@ class WorkerPanel(Static):
             f"  Inf   [green]{inf:>7,}[/green]",
             "  [dim]          avg    min    max[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
+            f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
             f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
             f"  Infer [white]{_fmt_ms_row(infer)}[/white] ms",
@@ -271,6 +273,7 @@ class GlobalPanel(Static):
         d = self._data
         rps = d.get("global_throughput_rps", 0.0)
         e2e = d.get("global_e2e_ms")
+        mcpy = d.get("global_trt_host_copy_ms")
         h2d = d.get("global_trt_h2d_ms")
         sem = d.get("global_sem_wait_ms")
         infer = d.get("global_infer_ms")
@@ -281,6 +284,7 @@ class GlobalPanel(Static):
             f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
             "  [dim]          avg    min    max[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
+            f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
             f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
             f"  Infer [white]{_fmt_ms_row(infer)}[/white] ms",

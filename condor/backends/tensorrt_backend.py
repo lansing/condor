@@ -264,6 +264,14 @@ class TensorRTBackend(BaseBackend):
         self._model_info: ModelInfo | None = None
         self._infer_sem: threading.BoundedSemaphore | None = None
 
+        # CUDA timing events (owned, created in _load_sync, destroyed in _cleanup_sync).
+        # Bracketing H2D / execute / D2H on the stream gives accurate GPU-side latency
+        # even with execute_async_v3, whose API call returns before the GPU is done.
+        self._ev_start = None      # recorded just before H2D async
+        self._ev_h2d_done = None   # recorded just after H2D async
+        self._ev_exec_done = None  # recorded just after execute_async_v3
+        self._ev_d2h_done = None   # recorded just after D2H async
+
     # ------------------------------------------------------------------
     # Shared-resource interface
     # ------------------------------------------------------------------
@@ -415,9 +423,14 @@ class TensorRTBackend(BaseBackend):
 
             for i in range(self._engine.num_io_tensors):
                 name = self._engine.get_tensor_name(i)
-                # self._bindings[i] holds the device pointer (int)
                 ptr = self._bindings[i]
                 self._context.set_tensor_address(name, ptr)
+
+            # Create timing events (CU_EVENT_DEFAULT = 0 enables timing).
+            self._ev_start = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
+            self._ev_h2d_done = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
+            self._ev_exec_done = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
+            self._ev_d2h_done = _unwrap(cu.cuEventCreate(0), "cuEventCreate")
         finally:
             cu.cuCtxPopCurrent()
 
@@ -427,22 +440,19 @@ class TensorRTBackend(BaseBackend):
         # 1. Push primary context onto this thread's context stack.
         _check(cu.cuCtxPushCurrent(self._cu_ctx), "cuCtxPushCurrent")
         try:
-            # 2. H→D copy (synchronous, DMA engine).
-            #
-            # IMPORTANT: cuMemcpyHtoD (not HtoDAsync) is required here.
-            # execute_v2 uses TRT's own internal CUDA stream; an async copy on
-            # a different stream has no ordering guarantee w.r.t. that stream
-            # and would cause one-behind data leakage.  The synchronous copy
-            # blocks this CPU thread until DMA is complete.
-            #
-            # The DMA engine and the GPU compute engine are independent
-            # hardware blocks.  While this worker is copying H→D, another
-            # worker that already holds the infer_sem can be executing
-            # execute_v2 simultaneously on the compute engine — pipelining.
-            t_h2d = time.perf_counter()
+            # 2. CPU-side staging copy: ravel + copyto into pinned host buffer.
+            #    This is pure CPU work and measured separately from the DMA.
+            t_host_copy = time.perf_counter()
+            with tracer.start_as_current_span("condor.trt.host_copy"):
+                np.copyto(self._inputs[0].host, input_tensor.ravel())
+            tel.record_trt_host_copy((time.perf_counter() - t_host_copy) * 1000)
+
+            # 3. H→D DMA (async on our stream).
+            #    Record ev_start before the DMA is queued so the GPU-side elapsed
+            #    time from ev_start → ev_h2d_done captures pure H→D latency.
             with tracer.start_as_current_span("condor.trt.h2d_copy") as h2d_span:
                 h2d_span.set_attribute("bytes_transferred", self._inputs[0]._nbytes)
-                np.copyto(self._inputs[0].host, input_tensor.ravel())
+                _check(cu.cuEventRecord(self._ev_start, self._stream), "cuEventRecord:start")
                 _check(
                     cu.cuMemcpyHtoDAsync(
                         self._inputs[0].device,
@@ -452,40 +462,30 @@ class TensorRTBackend(BaseBackend):
                     ),
                     "cuMemcpyHtoDAsync",
                 )
-            tel.record_trt_h2d((time.perf_counter() - t_h2d) * 1000)
+                _check(cu.cuEventRecord(self._ev_h2d_done, self._stream), "cuEventRecord:h2d_done")
 
-            # 3. Execute engine — guarded by the inference semaphore.
-            #    The semaphore serialises (or limits) compute-engine usage
-            #    across all workers.  H→D and D→H are intentionally outside
-            #    the guarded region so DMA can overlap with another worker's
-            #    compute step.
+            # 4. Execute engine — guarded by the inference semaphore.
+            #    H→D and D→H are intentionally outside the guarded region so
+            #    DMA can overlap with another worker's compute step.
             if self._infer_sem is not None:
                 t_sem = time.perf_counter()
                 with tracer.start_as_current_span("condor.infer_sem.wait"):
                     self._infer_sem.acquire()
                 tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
-            # inc_inference_concurrent brackets only the compute step so the
-            # TUI "concurrent" gauge accurately reflects GPU utilisation
-            # (≤ max_inference_concurrency), not the wider H→D/D→H pipeline.
+
             tel.inc_inference_concurrent()
             try:
-                t_exec = time.perf_counter()
                 with tracer.start_as_current_span("condor.trt.execute"):
                     ok = self._context.execute_async_v3(int(self._stream))
-                    # ok = self._context.execute_async_v3(stream_handle=int(self._stream))
-                tel.record_trt_execute((time.perf_counter() - t_exec) * 1000)
+                _check(cu.cuEventRecord(self._ev_exec_done, self._stream), "cuEventRecord:exec_done")
                 if not ok:
-                    logger.warning(
-                        "TRT execute_v2 returned False — output may be invalid."
-                    )
+                    logger.warning("TRT execute_async_v3 returned False — output may be invalid.")
             finally:
                 tel.dec_inference_concurrent()
                 if self._infer_sem is not None:
                     self._infer_sem.release()
 
-            # 4. D→H copy (synchronous).
-            #    execute_v2 has returned; device output buffers are fully written.
-            t_d2h = time.perf_counter()
+            # 5. D→H DMA (async on our stream).
             with tracer.start_as_current_span("condor.trt.d2h_copy"):
                 for out in self._outputs:
                     _check(
@@ -494,14 +494,31 @@ class TensorRTBackend(BaseBackend):
                         ),
                         "cuMemcpyDtoHAsync",
                     )
-            tel.record_trt_d2h((time.perf_counter() - t_d2h) * 1000)
+                _check(cu.cuEventRecord(self._ev_d2h_done, self._stream), "cuEventRecord:d2h_done")
 
-            t_sync = time.perf_counter()
+            # 6. Synchronise stream — blocks until all queued GPU work completes.
             _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize")
-            tel.record_sync(((time.perf_counter() - t_sync) * 1000))
+
+            # 7. Compute GPU-side elapsed times from CUDA events.
+            #    cuEventElapsedTime returns milliseconds.
+            h2d_ms = _unwrap(
+                cu.cuEventElapsedTime(self._ev_start, self._ev_h2d_done),
+                "cuEventElapsedTime:h2d",
+            )
+            exec_ms = _unwrap(
+                cu.cuEventElapsedTime(self._ev_h2d_done, self._ev_exec_done),
+                "cuEventElapsedTime:exec",
+            )
+            d2h_ms = _unwrap(
+                cu.cuEventElapsedTime(self._ev_exec_done, self._ev_d2h_done),
+                "cuEventElapsedTime:d2h",
+            )
+            tel.record_trt_h2d(h2d_ms)
+            tel.record_trt_execute(exec_ms)
+            tel.record_trt_d2h(d2h_ms)
 
         finally:
-            # 5. Always pop the context, even on error.
+            # 8. Always pop the context, even on error.
             cu.cuCtxPopCurrent()
 
         # 6. Return copies of output buffers reshaped to their declared shapes.
@@ -523,6 +540,12 @@ class TensorRTBackend(BaseBackend):
                     if self._stream is not None:
                         cu.cuStreamDestroy(self._stream)
                         self._stream = None
+
+                    # Destroy timing events.
+                    for ev in (self._ev_start, self._ev_h2d_done, self._ev_exec_done, self._ev_d2h_done):
+                        if ev is not None:
+                            cu.cuEventDestroy(ev)
+                    self._ev_start = self._ev_h2d_done = self._ev_exec_done = self._ev_d2h_done = None
 
                     # Explicitly free I/O buffers while context is active.
                     for buf in (*self._outputs, *self._inputs):

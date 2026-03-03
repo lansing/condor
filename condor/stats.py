@@ -115,6 +115,7 @@ class StatsCollector:
 
         # Global timing windows (backend-level; no worker_id available)
         self._sem_wait = _RollingWindow()
+        self._trt_host_copy = _RollingWindow()
         self._trt_h2d = _RollingWindow()
         self._trt_execute = _RollingWindow()
         self._trt_d2h = _RollingWindow()
@@ -194,6 +195,9 @@ class StatsCollector:
 
     def record_sem_wait(self, ms: float) -> None:
         self._sem_wait.add(ms)
+
+    def record_trt_host_copy(self, ms: float) -> None:
+        self._trt_host_copy.add(ms)
 
     def record_trt_h2d(self, ms: float) -> None:
         self._trt_h2d.add(ms)
@@ -320,6 +324,7 @@ class StatsCollector:
             "global_e2e_ms": global_e2e,
             "global_throughput_rps": global_rps,
             "global_sem_wait_ms": self._sem_wait.stats(),
+            "global_trt_host_copy_ms": self._trt_host_copy.stats(),
             "global_trt_h2d_ms": self._trt_h2d.stats(),
             "global_trt_execute_ms": self._trt_execute.stats(),
             "global_trt_d2h_ms": self._trt_d2h.stats(),

@@ -89,6 +89,7 @@ class _Tel:
         # Histograms
         self._req_hist = None
         self._infer_hist = None
+        self._trt_host_copy_hist = None
         self._trt_h2d_hist = None
         self._trt_execute_hist = None
         self._trt_d2h_hist = None
@@ -144,10 +145,15 @@ class _Tel:
             unit="ms",
             description="Backend inference latency (excludes post-processing)",
         )
+        self._trt_host_copy_hist = meter.create_histogram(
+            "condor.trt.host_copy.duration",
+            unit="ms",
+            description="CPU-side np.copyto into pinned host buffer before H2D DMA",
+        )
         self._trt_h2d_hist = meter.create_histogram(
             "condor.trt.h2d.duration",
             unit="ms",
-            description="TensorRT host-to-device DMA copy latency",
+            description="TensorRT host-to-device DMA copy latency (GPU-side, CUDA events)",
         )
         self._trt_execute_hist = meter.create_histogram(
             "condor.trt.execute.duration",
@@ -287,6 +293,11 @@ class _Tel:
                     "model_name": model_name,
                 },
             )
+
+    def record_trt_host_copy(self, ms: float) -> None:
+        self.stats.record_trt_host_copy(ms)
+        if self._trt_host_copy_hist is not None:
+            self._trt_host_copy_hist.record(ms)
 
     def record_trt_h2d(self, ms: float) -> None:
         self.stats.record_trt_h2d(ms)
