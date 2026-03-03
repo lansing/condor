@@ -233,9 +233,10 @@ class TensorRTBackend(BaseBackend):
 
     infer()  [called per request, inside asyncio.to_thread]
       → push primary ctx
-      → H→D copy (sync, DMA engine — not semaphore-guarded)
-      → [acquire infer_sem] execute_v2 [release infer_sem]   ← compute engine
-      → D→H copy (sync — not semaphore-guarded)
+      → H→D copy async  (outside semaphore — DMA overlaps prior worker's compute)
+      → [acquire infer_sem] execute_async_v3 → stream_sync [release infer_sem]
+      → D→H copy async  (outside semaphore — overlaps next worker's compute)
+      → stream_sync  (wait for D→H before reading host buffers)
       → pop ctx
 
     cleanup()  [called per worker]
@@ -465,8 +466,12 @@ class TensorRTBackend(BaseBackend):
                 _check(cu.cuEventRecord(self._ev_h2d_done, self._stream), "cuEventRecord:h2d_done")
 
             # 4. Execute engine — guarded by the inference semaphore.
-            #    H→D and D→H are intentionally outside the guarded region so
-            #    DMA can overlap with another worker's compute step.
+            #    H→D is intentionally outside the guarded region so DMA can
+            #    overlap with another worker's compute step.
+            #    The semaphore is held until the stream is synchronised so it
+            #    truly bounds concurrent GPU compute — execute_async_v3 only
+            #    *queues* work; releasing before stream-sync would allow
+            #    another worker to start executing before this one finishes.
             if self._infer_sem is not None:
                 t_sem = time.perf_counter()
                 with tracer.start_as_current_span("condor.infer_sem.wait"):
@@ -480,12 +485,16 @@ class TensorRTBackend(BaseBackend):
                 _check(cu.cuEventRecord(self._ev_exec_done, self._stream), "cuEventRecord:exec_done")
                 if not ok:
                     logger.warning("TRT execute_async_v3 returned False — output may be invalid.")
+                # Sync here: block until GPU compute is done, then release.
+                _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize:exec")
             finally:
                 tel.dec_inference_concurrent()
                 if self._infer_sem is not None:
                     self._infer_sem.release()
 
             # 5. D→H DMA (async on our stream).
+            #    GPU compute is complete; D2H can proceed without holding the
+            #    semaphore so another worker's H2D / compute can overlap.
             with tracer.start_as_current_span("condor.trt.d2h_copy"):
                 for out in self._outputs:
                     _check(
@@ -496,8 +505,8 @@ class TensorRTBackend(BaseBackend):
                     )
                 _check(cu.cuEventRecord(self._ev_d2h_done, self._stream), "cuEventRecord:d2h_done")
 
-            # 6. Synchronise stream — blocks until all queued GPU work completes.
-            _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize")
+            # 6. Final sync — wait for D→H DMA to complete before reading host buffers.
+            _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize:d2h")
 
             # 7. Compute GPU-side elapsed times from CUDA events.
             #    cuEventElapsedTime returns milliseconds.
