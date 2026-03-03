@@ -11,6 +11,7 @@ import threading
 
 from ..config.settings import AppConfig, load_config
 from ..model_manager.shared import SharedStateRegistry
+from ..telemetry import setup_telemetry
 from .zmq_handler import AsyncZMQHandler
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ def _run_worker(
             endpoint=endpoint,
             shared_registry=shared_registry,
             infer_sem=infer_sem,
+            worker_id=worker_idx,
         )
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
@@ -204,6 +206,7 @@ def main() -> None:
     args = _parse_args()
     config = load_config(args.config)
     _setup_logging(config.logging.level)
+    setup_telemetry(config.observability)
 
     if config.server.num_workers > 1:
         _run_multi(config)

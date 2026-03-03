@@ -31,11 +31,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from .base import ONNX_TYPE_TO_NUMPY, BaseBackend, ModelInfo, SharedBackendState
+from ..telemetry import tel, tracer
+from opentelemetry.trace import StatusCode
 
 logger = logging.getLogger(__name__)
 
@@ -157,14 +160,25 @@ class OnnxRuntimeBackend(BaseBackend):
     def _infer_sync(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         assert self._session is not None
         assert self._model_info is not None
+
         if self._infer_sem is not None:
-            with self._infer_sem:
-                return self._session.run(
-                    None, {self._model_info.input_name: input_tensor}
-                )
-        return self._session.run(
-            None, {self._model_info.input_name: input_tensor}
-        )
+            t_sem = time.perf_counter()
+            with tracer.start_as_current_span("condor.infer_sem.wait"):
+                self._infer_sem.acquire()
+            tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
+            try:
+                with tracer.start_as_current_span("condor.onnx.run"):
+                    result = self._session.run(
+                        None, {self._model_info.input_name: input_tensor}
+                    )
+            finally:
+                self._infer_sem.release()
+            return result
+
+        with tracer.start_as_current_span("condor.onnx.run"):
+            return self._session.run(
+                None, {self._model_info.input_name: input_tensor}
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers

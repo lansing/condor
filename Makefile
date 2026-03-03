@@ -4,7 +4,8 @@
         docker-build-openvino docker-run-openvino \
         docker-build-tensorrt docker-rebuild-tensorrt \
         docker-run-tensorrt docker-shell-tensorrt docker-test-tensorrt \
-        install-openvino install-onnxruntime-openvino
+        install-openvino install-onnxruntime-openvino \
+        install-observability-local install-observability-otlp
 
 CONFIG ?= config/config.yaml
 
@@ -36,6 +37,18 @@ install-openvino:
 install-onnxruntime-openvino:
 	uv pip uninstall onnxruntime --yes || true
 	uv pip install onnxruntime-openvino
+
+# ── Observability ───────────────────────────────────────────────────────────────
+
+# Lightweight local metrics: Prometheus scrape endpoint (no database needed).
+# After installing, set observability.mode: "prometheus" in config.yaml.
+install-observability-local:
+	uv sync --extra observability-local
+
+# Full OTLP export to HyperDX, Grafana Tempo, Jaeger, etc.
+# After installing, set observability.mode: "otlp" in config.yaml.
+install-observability-otlp:
+	uv sync --extra observability-otlp
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 

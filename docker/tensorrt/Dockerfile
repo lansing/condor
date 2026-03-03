@@ -41,27 +41,29 @@ ENV PATH="/root/.local/bin:$PATH"
 # importable without reinstalling or duplicating them.
 RUN uv venv --system-site-packages /opt/condor-venv
 ENV VIRTUAL_ENV=/opt/condor-venv
+# uv pip commands respect VIRTUAL_ENV; uv sync (a project command) uses
+# UV_PROJECT_ENVIRONMENT instead — both must point to the same venv.
+ENV UV_PROJECT_ENVIRONMENT=/opt/condor-venv
 ENV PATH="/opt/condor-venv/bin:$PATH"
 
 WORKDIR /app
 
-# Install project Python dependencies.
-# Intentionally excluded:
-#   onnxruntime  — not used in the TensorRT backend.
-#   tensorrt     — inherited from base image via --system-site-packages.
-#   cuda-python  — inherited from base image via --system-site-packages.
+# Copy project metadata (layer-cache friendly: dep install is re-run only when
+# pyproject.toml changes, not when application code changes).
 COPY pyproject.toml ./
-RUN uv pip install \
-        "pyzmq>=26.0" \
-        "aiofiles>=24.0" \
-        "numpy>=2.0" \
-        "pydantic>=2.0" \
-        "pyyaml>=6.0" \
-        "opencv-python-headless>=4.10"
 
-# Install the condor package itself (--no-deps: deps already installed above).
+# onnxruntime is not used by the TensorRT backend; remove it so uv sync does
+# not install a ~300 MB wheel that serves no purpose in this image.
+# tensorrt and cuda-python are provided by the NGC base via --system-site-packages.
+# All other deps — including opentelemetry-api/sdk — are installed from pyproject.toml.
+# No lockfile is used here because pyproject.toml is modified above; uv will
+# resolve and pin a fresh lockfile inside the build context.
+RUN sed -i '/"onnxruntime>=/d' pyproject.toml \
+    && uv sync --no-dev --no-install-project
+
+# Copy application code and install the condor package itself.
 COPY condor/ ./condor/
-RUN uv pip install --no-deps .
+RUN uv sync --no-dev
 
 # Default config (override at runtime with -v /path/to/config:/app/config).
 RUN mkdir -p /app/config /app/models

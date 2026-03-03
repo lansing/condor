@@ -54,6 +54,11 @@ class SharedStateRegistry:
                 logger.debug("SharedStateRegistry: reusing shared state for %r", key)
             return self._cache[key]
 
+    def contains(self, key: str) -> bool:
+        """Return True if *key* is already in the cache (best-effort, for metrics)."""
+        with self._lock:
+            return key in self._cache
+
     def invalidate(self, key: str) -> None:
         """Remove *key* from the cache so the next caller triggers a fresh load."""
         with self._lock:

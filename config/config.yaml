@@ -62,3 +62,41 @@ post_process:
 
 # logging:
 #   level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# ── Observability (OpenTelemetry traces + metrics) ──────────────────────────
+# Set enabled: true to activate.  mode controls where data goes:
+#
+#   "console"    — spans (optional) + metric snapshot to stdout every N seconds.
+#                  Zero extra software needed.
+#
+#   "prometheus" — Prometheus scrape endpoint at http://0.0.0.0:9090/metrics.
+#                  Requires: make install-observability-local
+#                  No database needed; just curl localhost:9090/metrics.
+#
+#   "otlp"       — Export traces + metrics via OTLP to HyperDX, Grafana, etc.
+#                  Requires: make install-observability-otlp
+#                  Self-hosted HyperDX: docker run -p 8080:8080 -p 4318:4318 hyperdx/hyperdx-local
+#
+observability:
+  enabled: true
+  mode: "console"           # console | prometheus | otlp
+  service_name: "condor"
+  service_version: "0.1.0"
+#
+#   # Console mode settings:
+  console:
+    metrics_interval_seconds: 30   # Print metric snapshot every N seconds
+#     export_traces: false           # Also print individual spans as JSON (verbose)
+#
+#   # Prometheus mode settings:
+#   prometheus:
+#     host: "0.0.0.0"
+#     port: 9090
+#
+#   # OTLP mode settings (HyperDX self-hosted or cloud):
+#   otlp:
+#     endpoint: "http://localhost:4318"    # HyperDX local; change to cloud URL
+#     headers: {}                          # {"authorization": "Bearer KEY"} for cloud
+#     export_traces: true
+#     export_metrics: true
+#     metrics_interval_seconds: 30

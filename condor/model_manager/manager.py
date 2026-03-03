@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from pathlib import Path
 
 import aiofiles
@@ -36,6 +37,8 @@ from ..backends.base import BaseBackend, ModelInfo
 from ..backends.onnx_backend import OnnxRuntimeBackend
 from ..backends.openvino_backend import OpenVINOBackend
 from ..backends.tensorrt_backend import TensorRTBackend
+from ..telemetry import tel, tracer
+from opentelemetry.trace import StatusCode
 from .shared import SharedStateRegistry
 
 logger = logging.getLogger(__name__)
@@ -128,55 +131,85 @@ class AsyncModelManager:
         (engine deserialisation, model compilation) are loaded via the registry
         and reused across all workers.
         """
-        logger.warning("load_model, entering lock")
-        async with self._lock:
-            logger.warning("load_model, in lock")
-            model_path = self.models_dir / model_name
-            if not model_path.exists():
-                logger.error("Model file not found: %s", model_path)
-                return False
+        provider = self.inference_config.get("provider", "onnx")
 
-            # Cleanup the existing backend before loading the new model so that
-            # GPU/NPU memory is released first (requirement §3.3).
-            if self._backend is not None:
-                logger.info(
-                    "Unloading current model (%s) before loading %s.",
-                    self._active_model,
-                    model_name,
-                )
-                await self._backend.cleanup()
-                self._backend = None
-                self._active_model = None
+        with tracer.start_as_current_span("condor.model.load") as load_span:
+            load_span.set_attribute("model_name", model_name)
+            load_span.set_attribute("provider", provider)
 
-            try:
-                backend = self._make_backend()
-                shared = None
+            t_lock = time.perf_counter()
+            async with self._lock:
+                lock_wait_ms = (time.perf_counter() - t_lock) * 1000
+                tel.record_model_lock_wait(lock_wait_ms)
+                load_span.set_attribute("lock_wait_ms", round(lock_wait_ms, 2))
 
-                if self._shared_registry is not None:
-                    # Load shared resources via the registry (at most once per
-                    # model across all workers; subsequent workers get cached state).
-                    key = self._shared_key(str(model_path))
-                    shared = await asyncio.to_thread(
-                        self._shared_registry.get_or_load,
-                        key,
-                        lambda: backend.load_shared_sync(
-                            str(model_path), self.inference_config
-                        ),
+                model_path = self.models_dir / model_name
+                if not model_path.exists():
+                    logger.error("Model file not found: %s", model_path)
+                    load_span.set_status(StatusCode.ERROR, "model file not found")
+                    tel.count_model_load(model_name=model_name, provider=provider, status="error")
+                    return False
+
+                # Cleanup the existing backend before loading the new model so that
+                # GPU/NPU memory is released first (requirement §3.3).
+                if self._backend is not None:
+                    logger.info(
+                        "Unloading current model (%s) before loading %s.",
+                        self._active_model,
+                        model_name,
                     )
+                    with tracer.start_as_current_span("condor.model.cleanup") as cleanup_span:
+                        cleanup_span.set_attribute("previous_model", self._active_model or "")
+                        await self._backend.cleanup()
+                    self._backend = None
+                    self._active_model = None
 
-                logger.warning("load_model, calling backend.load")
-                await backend.load(
-                    str(model_path),
-                    self.inference_config,
-                    shared=shared,
-                    infer_sem=self._infer_sem,
-                )
-                self._backend = backend
-                self._active_model = model_name
-                logger.info("Model loaded: %s  info=%s", model_name, backend.model_info)
-                return True
-            except Exception:
-                logger.exception("Failed to load model %s.", model_name)
-                self._backend = None
-                self._active_model = None
-                return False
+                try:
+                    backend = self._make_backend()
+                    shared = None
+
+                    if self._shared_registry is not None:
+                        # Load shared resources via the registry (at most once per
+                        # model across all workers; subsequent workers get cached state).
+                        key = self._shared_key(str(model_path))
+
+                        # Probe whether a cache hit is likely (rough check; the
+                        # real serialised check is inside get_or_load under its lock).
+                        cache_hit_before = self._shared_registry.contains(key)
+
+                        with tracer.start_as_current_span("condor.shared_state.get_or_load") as ss_span:
+                            ss_span.set_attribute("model_key", key)
+                            shared = await asyncio.to_thread(
+                                self._shared_registry.get_or_load,
+                                key,
+                                lambda: backend.load_shared_sync(
+                                    str(model_path), self.inference_config
+                                ),
+                            )
+
+                        if cache_hit_before:
+                            ss_span.set_attribute("cache_hit", True)
+                            tel.count_cache_hit(provider=provider, model_name=model_name)
+                        else:
+                            ss_span.set_attribute("cache_hit", False)
+                            tel.count_cache_miss(provider=provider, model_name=model_name)
+
+                    with tracer.start_as_current_span("condor.backend.load"):
+                        await backend.load(
+                            str(model_path),
+                            self.inference_config,
+                            shared=shared,
+                            infer_sem=self._infer_sem,
+                        )
+                    self._backend = backend
+                    self._active_model = model_name
+                    logger.info("Model loaded: %s  info=%s", model_name, backend.model_info)
+                    tel.count_model_load(model_name=model_name, provider=provider, status="ok")
+                    return True
+                except Exception:
+                    logger.exception("Failed to load model %s.", model_name)
+                    load_span.set_status(StatusCode.ERROR, "backend load failed")
+                    tel.count_model_load(model_name=model_name, provider=provider, status="error")
+                    self._backend = None
+                    self._active_model = None
+                    return False

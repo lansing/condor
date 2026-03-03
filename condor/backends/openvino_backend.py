@@ -29,11 +29,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from .base import BaseBackend, ModelInfo, SharedBackendState
+from ..telemetry import tel, tracer
 
 logger = logging.getLogger(__name__)
 
@@ -206,11 +208,21 @@ class OpenVINOBackend(BaseBackend):
     def _infer_sync(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         assert self._request is not None
         assert self._model_info is not None
+
         if self._infer_sem is not None:
-            with self._infer_sem:
-                self._request.infer({self._model_info.input_name: input_tensor})
+            t_sem = time.perf_counter()
+            with tracer.start_as_current_span("condor.infer_sem.wait"):
+                self._infer_sem.acquire()
+            tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
+            try:
+                with tracer.start_as_current_span("condor.ov.infer"):
+                    self._request.infer({self._model_info.input_name: input_tensor})
+            finally:
+                self._infer_sem.release()
         else:
-            self._request.infer({self._model_info.input_name: input_tensor})
+            with tracer.start_as_current_span("condor.ov.infer"):
+                self._request.infer({self._model_info.input_name: input_tensor})
+
         return [
             self._request.get_output_tensor(i).data.copy()
             for i in range(len(self._model_info.output_names))

@@ -28,15 +28,18 @@ import asyncio
 import json
 import logging
 import threading
+import time
 
 import numpy as np
 import zmq
 import zmq.asyncio
+from opentelemetry.trace import StatusCode
 
 from ..config.settings import AppConfig
 from ..model_manager.manager import AsyncModelManager
 from ..model_manager.shared import SharedStateRegistry
 from ..post_process.yolov10 import YoloV10PostProcessor
+from ..telemetry import tel, tracer
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +61,11 @@ class AsyncZMQHandler:
         endpoint: str | None = None,
         shared_registry: SharedStateRegistry | None = None,
         infer_sem: threading.BoundedSemaphore | None = None,
+        worker_id: int = 0,
     ) -> None:
         self.config = config
         self._endpoint = endpoint or config.server.endpoint
+        self._worker_id = worker_id
         self.manager = AsyncModelManager(
             models_dir=config.server.models_dir,
             inference_config=config.inference.model_dump(),
@@ -84,6 +89,7 @@ class AsyncZMQHandler:
         endpoint = self._endpoint
         self._socket.bind(endpoint)
         self._running = True
+        tel.inc_workers_active()
         logger.info("ZMQ server bound to %s. Ready.", endpoint)
 
         try:
@@ -107,6 +113,7 @@ class AsyncZMQHandler:
                 except zmq.ZMQError as exc:
                     logger.error("ZMQ send error: %s", exc)
         finally:
+            tel.dec_workers_active()
             # linger=0: discard unsent messages immediately so ctx.term() doesn't block.
             self._socket.setsockopt(zmq.LINGER, 0)
             self._socket.close()
@@ -128,15 +135,36 @@ class AsyncZMQHandler:
             return _zeros_response()
 
         if "model_request" in header:
-            return await self._handle_model_request(header)
+            request_type = "model_request"
+        elif "model_data" in header:
+            request_type = "model_data"
+        else:
+            request_type = "inference"
 
-        if "model_data" in header:
-            data = frames[1] if len(frames) > 1 else b""
-            return await self._handle_model_data(header, data)
+        t_start = time.perf_counter()
+        with tracer.start_as_current_span("condor.request") as span:
+            span.set_attribute("worker_id", self._worker_id)
+            span.set_attribute("request_type", request_type)
+            if self.manager.active_model:
+                span.set_attribute("model_name", self.manager.active_model)
 
-        # Inference request
-        tensor_bytes = frames[1] if len(frames) > 1 else None
-        return await self._handle_inference(header, tensor_bytes)
+            try:
+                if request_type == "model_request":
+                    result = await self._handle_model_request(header)
+                elif request_type == "model_data":
+                    data = frames[1] if len(frames) > 1 else b""
+                    result = await self._handle_model_data(header, data)
+                else:
+                    tensor_bytes = frames[1] if len(frames) > 1 else None
+                    result = await self._handle_inference(header, tensor_bytes)
+            except Exception:
+                span.set_status(StatusCode.ERROR, "unhandled dispatch error")
+                raise
+
+        elapsed_ms = (time.perf_counter() - t_start) * 1000
+        tel.count_request(worker_id=self._worker_id, request_type=request_type, status="ok")
+        tel.record_request_duration(elapsed_ms, worker_id=self._worker_id, request_type=request_type)
+        return result
 
     # ------------------------------------------------------------------
     # Model management handlers
@@ -199,50 +227,96 @@ class AsyncZMQHandler:
             logger.warning("Backend loaded but model_info is unavailable.")
             return _zeros_response()
 
-        # --- dtype validation ---
-        request_dtype: str = header.get("dtype", "uint8")
-        expected_dtype: str = model_info.input_dtype
-        if request_dtype != expected_dtype:
-            logger.error(
-                "Input dtype mismatch: Frigate sent '%s', model expects '%s'. "
-                "Returning zero detections.",
-                request_dtype,
-                expected_dtype,
+        model_name = self.manager.active_model or ""
+        provider = self.config.inference.provider
+
+        with tracer.start_as_current_span("condor.inference") as infer_span:
+            infer_span.set_attribute("model_name", model_name)
+            infer_span.set_attribute("provider", provider)
+            infer_span.set_attribute("worker_id", self._worker_id)
+
+            # --- dtype validation ---
+            request_dtype: str = header.get("dtype", "uint8")
+            expected_dtype: str = model_info.input_dtype
+            with tracer.start_as_current_span("condor.dtype_validation") as dv_span:
+                dv_span.set_attribute("expected_dtype", expected_dtype)
+                dv_span.set_attribute("received_dtype", request_dtype)
+                if request_dtype != expected_dtype:
+                    dv_span.set_attribute("mismatch", True)
+                    logger.error(
+                        "Input dtype mismatch: Frigate sent '%s', model expects '%s'. "
+                        "Returning zero detections.",
+                        request_dtype,
+                        expected_dtype,
+                    )
+                    tel.count_dtype_mismatch(expected=expected_dtype, received=request_dtype)
+                    return _zeros_response()
+                dv_span.set_attribute("mismatch", False)
+
+            # --- reconstruct tensor ---
+            with tracer.start_as_current_span("condor.tensor.reconstruct") as tr_span:
+                try:
+                    shape = tuple(int(d) for d in header["shape"])
+                    tr_span.set_attribute("input_bytes", len(tensor_bytes))
+                    tr_span.set_attribute("input_shape", str(shape))
+                    tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(shape)
+                except Exception:
+                    logger.exception(
+                        "Failed to reconstruct input tensor from header %s.", header
+                    )
+                    return _zeros_response()
+
+            # --- inference ---
+            infer_span.set_attribute("input_shape", str(shape))
+            t_infer = time.perf_counter()
+            tel.inc_inference_concurrent()
+            try:
+                outputs = await backend.infer(tensor)
+            except Exception:
+                logger.exception("Inference failed.")
+                tel.count_inference(
+                    worker_id=self._worker_id, model_name=model_name,
+                    provider=provider, status="error",
+                )
+                return _zeros_response()
+            finally:
+                tel.dec_inference_concurrent()
+
+            infer_duration_ms = (time.perf_counter() - t_infer) * 1000
+            tel.record_inference_duration(
+                infer_duration_ms, provider=provider, model_name=model_name
             )
-            return _zeros_response()
-
-        # --- reconstruct tensor ---
-        try:
-            shape = tuple(int(d) for d in header["shape"])
-            tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(shape)
-        except Exception:
-            logger.exception(
-                "Failed to reconstruct input tensor from header %s.", header
+            tel.count_inference(
+                worker_id=self._worker_id, model_name=model_name,
+                provider=provider, status="ok",
             )
-            return _zeros_response()
 
-        # --- inference ---
-        try:
-            outputs = await backend.infer(tensor)
-        except Exception:
-            logger.exception("Inference failed.")
-            return _zeros_response()
+            # --- post-process ---
+            # Extract spatial dims respecting the model's declared input layout.
+            t_pp = time.perf_counter()
+            with tracer.start_as_current_span("condor.post_process") as pp_span:
+                pp_span.set_attribute("post_processor", type(self.post_processor).__name__)
+                try:
+                    if model_info.input_layout == "nhwc":
+                        # [N, H, W, C] → H = shape[1], W = shape[2]
+                        input_h = int(shape[1])
+                        input_w = int(shape[2])
+                    else:
+                        # [N, C, H, W] → H = shape[2], W = shape[3]
+                        input_h = int(shape[2])
+                        input_w = int(shape[3])
+                    result = await self.post_processor.process(outputs, (input_h, input_w))
+                    num_detections = int((result[:, 1] > 0).sum())
+                    pp_span.set_attribute("detections_final", num_detections)
+                    infer_span.set_attribute("num_detections", num_detections)
+                except Exception:
+                    logger.exception("Post-processing failed.")
+                    return _zeros_response()
 
-        # --- post-process ---
-        # Extract spatial dims respecting the model's declared input layout.
-        try:
-            if model_info.input_layout == "nhwc":
-                # [N, H, W, C] → H = shape[1], W = shape[2]
-                input_h = int(shape[1])
-                input_w = int(shape[2])
-            else:
-                # [N, C, H, W] → H = shape[2], W = shape[3]
-                input_h = int(shape[2])
-                input_w = int(shape[3])
-            result = await self.post_processor.process(outputs, (input_h, input_w))
-        except Exception:
-            logger.exception("Post-processing failed.")
-            return _zeros_response()
+            tel.record_postprocess_duration(
+                (time.perf_counter() - t_pp) * 1000,
+                post_processor=type(self.post_processor).__name__,
+            )
 
         resp_header = {"shape": list(result.shape), "dtype": "float32"}
         return [json.dumps(resp_header).encode(), result.tobytes(order="C")]

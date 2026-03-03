@@ -24,11 +24,13 @@ import asyncio
 import ctypes
 import logging
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from .base import BaseBackend, ModelInfo, SharedBackendState
+from ..telemetry import tel, tracer
 
 logger = logging.getLogger(__name__)
 
@@ -425,15 +427,19 @@ class TensorRTBackend(BaseBackend):
             # hardware blocks.  While this worker is copying H→D, another
             # worker that already holds the infer_sem can be executing
             # execute_v2 simultaneously on the compute engine — pipelining.
-            np.copyto(self._inputs[0].host, input_tensor.ravel())
-            _check(
-                cu.cuMemcpyHtoD(
-                    self._inputs[0].device,
-                    self._inputs[0]._host_ptr,
-                    self._inputs[0]._nbytes,
-                ),
-                "cuMemcpyHtoD",
-            )
+            t_h2d = time.perf_counter()
+            with tracer.start_as_current_span("condor.trt.h2d_copy") as h2d_span:
+                h2d_span.set_attribute("bytes_transferred", self._inputs[0]._nbytes)
+                np.copyto(self._inputs[0].host, input_tensor.ravel())
+                _check(
+                    cu.cuMemcpyHtoD(
+                        self._inputs[0].device,
+                        self._inputs[0]._host_ptr,
+                        self._inputs[0]._nbytes,
+                    ),
+                    "cuMemcpyHtoD",
+                )
+            tel.record_trt_h2d((time.perf_counter() - t_h2d) * 1000)
 
             # 3. Execute engine — guarded by the inference semaphore.
             #    The semaphore serialises (or limits) compute-engine usage
@@ -441,9 +447,15 @@ class TensorRTBackend(BaseBackend):
             #    the guarded region so DMA can overlap with another worker's
             #    compute step.
             if self._infer_sem is not None:
-                self._infer_sem.acquire()
+                t_sem = time.perf_counter()
+                with tracer.start_as_current_span("condor.infer_sem.wait"):
+                    self._infer_sem.acquire()
+                tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
             try:
-                ok = self._context.execute_v2(self._bindings)
+                t_exec = time.perf_counter()
+                with tracer.start_as_current_span("condor.trt.execute"):
+                    ok = self._context.execute_v2(self._bindings)
+                tel.record_trt_execute((time.perf_counter() - t_exec) * 1000)
                 if not ok:
                     logger.warning(
                         "TRT execute_v2 returned False — output may be invalid."
@@ -454,15 +466,18 @@ class TensorRTBackend(BaseBackend):
 
             # 4. D→H copy (synchronous).
             #    execute_v2 has returned; device output buffers are fully written.
-            for out in self._outputs:
-                _check(
-                    cu.cuMemcpyDtoH(
-                        out._host_ptr,
-                        out.device,
-                        out._nbytes,
-                    ),
-                    "cuMemcpyDtoH",
-                )
+            t_d2h = time.perf_counter()
+            with tracer.start_as_current_span("condor.trt.d2h_copy"):
+                for out in self._outputs:
+                    _check(
+                        cu.cuMemcpyDtoH(
+                            out._host_ptr,
+                            out.device,
+                            out._nbytes,
+                        ),
+                        "cuMemcpyDtoH",
+                    )
+            tel.record_trt_d2h((time.perf_counter() - t_d2h) * 1000)
 
         finally:
             # 5. Always pop the context, even on error.
