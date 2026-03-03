@@ -225,8 +225,12 @@ class StatsCollector:
                 all_e2e.append(s["avg"])
             total_rps += w.e2e.rate()
 
+        # Always append to sparklines so they scroll smoothly at 1 Hz
         if all_e2e:
             self._sparkline_latency.append(round(sum(all_e2e) / len(all_e2e), 1))
+        else:
+            # If no data, repeat the last value (or 0 if empty)
+            self._sparkline_latency.append(self._sparkline_latency[-1] if self._sparkline_latency else 0.0)
         self._sparkline_throughput.append(round(total_rps, 2))
 
     # --- snapshot ----------------------------------------------------------
