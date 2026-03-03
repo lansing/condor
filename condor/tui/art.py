@@ -106,24 +106,26 @@ def get_bird_frame(frame_index: int) -> str:
     return f"{bird.left_wing}{bird.body}{bird.right_wing}"
 
 
-def build_combined_logo(condor_lines: list[str], provider_lines: list[str], bird_x: int | None = None, bird_y: int | None = None, bird_frame: int = 0) -> str:
+def build_combined_logo(condor_lines: list[str], provider_lines: list[str], total_width: int = 90, bird_x: int | None = None, bird_y: int | None = None, bird_frame: int = 0) -> str:
     """Combine CONDOR logo (left) and provider logo (right) into a single box."""
-    # Fixed width for consistent layout
-    total_width = 90
-    condor_width = 54
+    condor_width = 54  # CONDOR logo is ~51 chars wide; leaves gap before provider
 
     combined_lines = []
+
+    # Normalise all provider lines to the same width so the logo's vertical
+    # box-drawing characters stay aligned after rjust.
+    max_provider_len = max((len(l) for l in provider_lines), default=0)
+    provider_width = max(total_width - condor_width, 0)
 
     for i in range(max(len(condor_lines), len(provider_lines))):
         condor_line = condor_lines[i] if i < len(condor_lines) else ""
         provider_line = provider_lines[i] if i < len(provider_lines) else ""
 
-        # Left-align CONDOR, right-align provider
         condor_padded = condor_line.ljust(condor_width)
-        provider_padded = provider_line.rjust(total_width - condor_width)
+        # First pad each line to the widest provider line (preserves internal
+        # column alignment), then right-justify the whole block.
+        provider_padded = provider_line.ljust(max_provider_len).rjust(provider_width)
 
-        combined = condor_padded + provider_padded
-
-        combined_lines.append(combined)
+        combined_lines.append(f"{condor_padded}[red]{provider_padded}[/red]")
 
     return "\n".join(combined_lines)

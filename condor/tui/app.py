@@ -68,7 +68,6 @@ class HeaderWidget(Static):
     HeaderWidget {
         height: 8;
         border: heavy $success;
-        padding: 0 1;
         color: $success;
         background: $background;
     }
@@ -92,10 +91,10 @@ class HeaderWidget(Static):
         condor_lines = CONDOR_LOGO.split("\n")
         provider_lines = get_provider_logo(self.provider).split("\n")
 
-        # Bird animation disabled temporarily
         return build_combined_logo(
             condor_lines,
             provider_lines,
+            total_width=self.size.width,
         )
 
     def watch_provider(self) -> None:
@@ -437,29 +436,38 @@ class CondorTUI(App[None]):
             f"⏱ [cyan]{_fmt_time(uptime)}[/cyan]  "
             f"⚙ [yellow]{workers_active}/{num_workers} workers[/yellow]  "
             f"📦 [white]{model}[/white]  "
-            f"[magenta]{provider or '—'}[/magenta]  "
-            f"[green]{rps:.1f} rps[/green]"
+            f"[magenta]{provider or '—'}[/magenta]"
         )
         self.query_one("#status-bar", StatusBar).update(status_text)
 
         # Update sparklines
-        lat_data = data.get("sparkline_latency", [])
-        tput_data = data.get("sparkline_throughput", [])
+        _SPARKLINE_LEN = 60  # must match stats._SPARKLINE_LEN
+
+        lat_data = list(data.get("sparkline_latency", []))
+        tput_data = list(data.get("sparkline_throughput", []))
+
+        # Pad with leading zeros so X-scale is consistent from startup
+        if len(lat_data) < _SPARKLINE_LEN:
+            lat_data = [0.0] * (_SPARKLINE_LEN - len(lat_data)) + lat_data
+        if len(tput_data) < _SPARKLINE_LEN:
+            tput_data = [0.0] * (_SPARKLINE_LEN - len(tput_data)) + tput_data
 
         lat_summary = ""
-        if lat_data:
+        if any(v > 0 for v in lat_data):
+            nonzero = [v for v in lat_data if v > 0]
             lat_summary = (
                 f"  now {lat_data[-1]:.1f}  "
-                f"avg {sum(lat_data)/len(lat_data):.1f}  "
+                f"avg {sum(nonzero)/len(nonzero):.1f}  "
                 f"peak {max(lat_data):.1f}"
             )
         self.query_one("#latency-panel", GraphPanel).update_data(lat_data, lat_summary)
 
         tput_summary = ""
-        if tput_data:
+        if any(v > 0 for v in tput_data):
+            nonzero = [v for v in tput_data if v > 0]
             tput_summary = (
                 f"  now {tput_data[-1]:.1f}  "
-                f"avg {sum(tput_data)/len(tput_data):.1f}  "
+                f"avg {sum(nonzero)/len(nonzero):.1f}  "
                 f"peak {max(tput_data):.1f}"
             )
         self.query_one("#throughput-panel", GraphPanel).update_data(

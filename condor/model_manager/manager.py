@@ -153,6 +153,44 @@ class AsyncModelManager:
 
         return False
 
+    async def auto_load_from_disk(self) -> bool:
+        """Load the first model file found in models_dir.
+
+        Called when Condor restarts while Frigate is still running: Frigate
+        already did the model-request handshake with the previous Condor
+        instance and will not repeat it, so inference requests arrive before
+        any model is explicitly loaded.  Scanning the models directory and
+        loading whatever is there recovers from this scenario automatically.
+
+        Returns True if a model is now loaded (already was, or just finished).
+        """
+        if self._backend is not None:
+            return True
+
+        _MODEL_SUFFIXES = {".onnx", ".engine", ".trt", ".xml", ".pt"}
+        try:
+            candidates = sorted(
+                p.name
+                for p in self.models_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in _MODEL_SUFFIXES
+            )
+        except OSError:
+            return False
+
+        if not candidates:
+            logger.warning(
+                "auto_load_from_disk: no model files in %s.", self.models_dir
+            )
+            return False
+
+        model_name = candidates[0]
+        logger.info(
+            "Auto-loading '%s' from disk (Frigate skipped model-request handshake "
+            "after Condor restart).",
+            model_name,
+        )
+        return await self.load_model(model_name)
+
     async def load_model(self, model_name: str) -> bool:
         """Load *model_name* into the backend, replacing any currently loaded model.
 

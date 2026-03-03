@@ -219,9 +219,12 @@ class AsyncZMQHandler:
 
         backend = self.manager.backend
         if backend is None:
-            # Another worker may have loaded the model via the shared registry.
-            # Try a cheap lazy-load (per-worker setup only) before giving up.
+            # 1. Another worker may have loaded via the shared registry.
             await self.manager.lazy_load_from_registry()
+            # 2. After a full Condor restart Frigate may skip the model-request
+            #    handshake (it thinks the model is still loaded).  Scan disk.
+            if self.manager.backend is None:
+                await self.manager.auto_load_from_disk()
             backend = self.manager.backend
         if backend is None:
             logger.warning("Inference request received but no model is loaded.")
