@@ -26,7 +26,7 @@ from textual.widget import Widget
 from textual.widgets import Footer, Sparkline, Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
-from .art import CONDOR_LOGO, get_provider_logo
+from .art import CONDOR_LOGO, build_combined_logo, get_provider_logo, get_bird_frame
 
 # Allow override via env var so the host TUI can reach a socket that is
 # bind-mounted from a running Docker container (see docker-compose.yaml).
@@ -61,35 +61,72 @@ def _fmt_ms_row(d: dict | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-class HeaderWidget(Widget):
-    """CONDOR ASCII art on the left; provider logo on the right."""
+class HeaderWidget(Static):
+    """Combined CONDOR logo (left) and provider logo (right) with flying bird animation."""
 
     DEFAULT_CSS = """
     HeaderWidget {
         height: 8;
-        layout: horizontal;
-        background: $background;
-    }
-    #condor-box {
-        width: 3fr;
         border: heavy $success;
         padding: 0 1;
         color: $success;
-    }
-    #provider-box {
-        width: 2fr;
-        border: heavy $warning;
-        padding: 0 1;
-        color: $warning;
-        content-align: center middle;
+        background: $background;
     }
     """
 
-    provider: reactive[str] = reactive("", recompose=True)
+    provider: reactive[str] = reactive("", layout=False)
 
-    def compose(self) -> ComposeResult:
-        yield Static(CONDOR_LOGO, id="condor-box")
-        yield Static(get_provider_logo(self.provider), id="provider-box")
+    def __init__(self) -> None:
+        super().__init__()
+        self._bird_x = 5
+        self._bird_y = 1
+        self._bird_x_direction = 1
+        self._bird_y_direction = 1
+        self._animation_tick = 0
+
+    def on_mount(self) -> None:
+        """Start the animation loop."""
+        self._start_animation()
+
+    @work(exclusive=True)
+    async def _start_animation(self) -> None:
+        """Continuously animate the bird."""
+        while True:
+            self._animation_tick += 1
+
+            # Move bird every 2 frames
+            if self._animation_tick % 2 == 0:
+                self._bird_x += self._bird_x_direction
+                self._bird_y += self._bird_y_direction
+
+                # Bounce off edges
+                max_x = 20  # Bird moves in the gap between logos
+                max_y = 5
+                if self._bird_x <= 0 or self._bird_x >= max_x:
+                    self._bird_x_direction *= -1
+                if self._bird_y <= 0 or self._bird_y >= max_y:
+                    self._bird_y_direction *= -1
+
+            self.refresh()
+            await asyncio.sleep(0.05)  # ~20 FPS
+
+    def render(self) -> str:
+        condor_lines = CONDOR_LOGO.split("\n")
+        provider_lines = get_provider_logo(self.provider).split("\n")
+
+        bird_frame = (self._animation_tick // 3) % 4
+
+        return build_combined_logo(
+            condor_lines,
+            provider_lines,
+            bird_x=self._bird_x,
+            bird_y=self._bird_y,
+            bird_frame=bird_frame,
+        )
+
+    def watch_provider(self) -> None:
+        """Refresh when provider changes."""
+        self.refresh()
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +157,7 @@ class GraphPanel(Widget):
 
     DEFAULT_CSS = """
     GraphPanel {
-        height: 8;
+        height: 1fr;
         border: heavy $accent;
         padding: 0 1;
         background: $background;
@@ -131,7 +168,7 @@ class GraphPanel(Widget):
         text-style: bold;
     }
     GraphPanel > Sparkline {
-        height: 5;
+        height: 1fr;
     }
     GraphPanel > .summary {
         height: 1;
@@ -312,11 +349,12 @@ class CondorTUI(App[None]):
     }
 
     #graphs-row {
-        height: 10;
+        height: 1fr;
     }
 
     #graphs-row GraphPanel {
         width: 1fr;
+        height: 1fr;
     }
 
     #graphs-row #latency-panel {
@@ -437,7 +475,6 @@ class CondorTUI(App[None]):
             f"⚙ [yellow]{workers_active}/{num_workers} workers[/yellow]  "
             f"📦 [white]{model}[/white]  "
             f"[magenta]{provider or '—'}[/magenta]  "
-            f"⚡ [cyan]{concurrent} concurrent[/cyan]  "
             f"[green]{rps:.1f} rps[/green]"
         )
         self.query_one("#status-bar", StatusBar).update(status_text)
