@@ -121,6 +121,38 @@ class AsyncModelManager:
             logger.exception("Failed to save model %s.", model_name)
             return False
 
+    async def lazy_load_from_registry(self) -> bool:
+        """Load per-worker resources from the shared registry cache without waiting
+        for Frigate to explicitly send a model-request to this worker.
+
+        In multi-worker mode Frigate addresses only one worker with the initial
+        model-request message.  All other workers must self-initialise on first
+        inference so they can serve requests immediately.  The expensive shared
+        work (engine deserialisation, etc.) is already cached; only the cheap
+        per-worker setup (execution context, I/O buffers) is repeated here.
+
+        Returns True if a model is now loaded (already was, or just finished).
+        """
+        if self._backend is not None:
+            return True
+        if self._shared_registry is None:
+            return False
+
+        provider = self.inference_config.get("provider", "onnx").lower()
+        prefix = f"{provider}:"
+        for key in self._shared_registry.cached_keys():
+            if key.startswith(prefix):
+                # key = "tensorrt:/abs/path/to/model.engine"
+                model_path = key[len(prefix):]
+                model_name = Path(model_path).name
+                logger.info(
+                    "Worker has no model; lazy-loading %s from registry cache.",
+                    model_name,
+                )
+                return await self.load_model(model_name)
+
+        return False
+
     async def load_model(self, model_name: str) -> bool:
         """Load *model_name* into the backend, replacing any currently loaded model.
 

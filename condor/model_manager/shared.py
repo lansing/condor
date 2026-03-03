@@ -59,6 +59,11 @@ class SharedStateRegistry:
         with self._lock:
             return key in self._cache
 
+    def cached_keys(self) -> list[str]:
+        """Return a snapshot of all currently cached keys."""
+        with self._lock:
+            return list(self._cache.keys())
+
     def invalidate(self, key: str) -> None:
         """Remove *key* from the cache so the next caller triggers a fresh load."""
         with self._lock:

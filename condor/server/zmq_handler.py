@@ -219,6 +219,11 @@ class AsyncZMQHandler:
 
         backend = self.manager.backend
         if backend is None:
+            # Another worker may have loaded the model via the shared registry.
+            # Try a cheap lazy-load (per-worker setup only) before giving up.
+            await self.manager.lazy_load_from_registry()
+            backend = self.manager.backend
+        if backend is None:
             logger.warning("Inference request received but no model is loaded.")
             return _zeros_response()
 
