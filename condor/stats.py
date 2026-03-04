@@ -75,6 +75,12 @@ class _RollingWindow:
             self._evict(now)
             return len(self._data) / self._window_s
 
+    def set_window(self, window_s: float) -> None:
+        """Change the rolling window duration. Old data outside the new window
+        will be evicted on the next stats() / rate() call."""
+        with self._lock:
+            self._window_s = window_s
+
 
 # ---------------------------------------------------------------------------
 # Per-worker stats bucket
@@ -207,6 +213,36 @@ class StatsCollector:
 
     def record_trt_d2h(self, ms: float) -> None:
         self._trt_d2h.add(ms)
+
+    # --- time config -------------------------------------------------------
+
+    def set_window_config(self, window_s: float, sparkline_len: int) -> None:
+        """Update rolling window duration and sparkline depth for all metrics.
+
+        Called when the TUI changes the tick settings.  Old data outside the
+        new window expires naturally on the next stats() call.
+        """
+        window_s = max(1.0, window_s)
+        sparkline_len = max(10, sparkline_len)
+
+        with self._lock:
+            for w in self._workers.values():
+                w.e2e.set_window(window_s)
+                w.infer.set_window(window_s)
+                w.postprocess.set_window(window_s)
+            for rw in (self._sem_wait, self._trt_host_copy, self._trt_h2d,
+                       self._trt_execute, self._trt_d2h):
+                rw.set_window(window_s)
+
+        with self._sparkline_lock:
+            old_lat = list(self._sparkline_latency)
+            old_tput = list(self._sparkline_throughput)
+            self._sparkline_latency = collections.deque(
+                old_lat[-sparkline_len:], maxlen=sparkline_len
+            )
+            self._sparkline_throughput = collections.deque(
+                old_tput[-sparkline_len:], maxlen=sparkline_len
+            )
 
     # --- sparkline ---------------------------------------------------------
 
@@ -409,10 +445,35 @@ class StatsServer:
                 snap = json.dumps(self._collector.snapshot()) + "\n"
                 conn.sendall(snap.encode())
                 self._stop.wait(1.0)
+                # Non-blocking check for config messages sent back by the TUI.
+                conn.setblocking(False)
+                try:
+                    data = conn.recv(4096)
+                    if data:
+                        self._apply_client_config(data.decode(errors="replace"))
+                except (BlockingIOError, OSError):
+                    pass
+                finally:
+                    conn.setblocking(True)
         except (BrokenPipeError, OSError):
             pass
         finally:
             try:
                 conn.close()
             except OSError:
+                pass
+
+    def _apply_client_config(self, raw: str) -> None:
+        """Parse and apply JSON config messages received from the TUI."""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                ws = msg.get("window_s")
+                sl = msg.get("sparkline_len")
+                if ws is not None and sl is not None:
+                    self._collector.set_window_config(float(ws), int(sl))
+            except (json.JSONDecodeError, ValueError, KeyError):
                 pass

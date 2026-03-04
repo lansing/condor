@@ -20,10 +20,11 @@ from pathlib import Path
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Horizontal
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Footer, Sparkline, Static
+from textual.widgets import Sparkline, Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
 from .art import CONDOR_LOGO, build_combined_logo, get_provider_logo, get_bird_frame
@@ -200,16 +201,37 @@ class WorkerPanel(Static):
     }
     """
 
+    # Metric keys that can be None when the rolling window is empty.
+    _WORKER_STICKY = ("e2e_ms", "infer_ms", "postprocess_ms")
+    _GLOBAL_STICKY = (
+        "global_trt_host_copy_ms", "global_trt_h2d_ms", "global_sem_wait_ms",
+        "global_trt_execute_ms", "global_trt_d2h_ms",
+    )
+
     def __init__(self, worker_id: int, port: int) -> None:
         super().__init__(id=f"worker-panel-{worker_id}")
         self._worker_id = worker_id
         self._port = port
         self._data: dict = {}
         self._trt_data: dict = {}
+        self._frozen: dict = {}  # last-known non-None values
 
     def update_data(self, wdata: dict, snapshot: dict) -> None:
-        self._data = wdata
-        self._trt_data = snapshot
+        # Freeze metric values: update cache on non-None, substitute on None.
+        merged_w = dict(wdata)
+        merged_g = dict(snapshot)
+        for key in self._WORKER_STICKY:
+            if wdata.get(key) is not None:
+                self._frozen[key] = wdata[key]
+            elif key in self._frozen:
+                merged_w[key] = self._frozen[key]
+        for key in self._GLOBAL_STICKY:
+            if snapshot.get(key) is not None:
+                self._frozen[key] = snapshot[key]
+            elif key in self._frozen:
+                merged_g[key] = self._frozen[key]
+        self._data = merged_w
+        self._trt_data = merged_g
         self.refresh()
 
     def render(self) -> str:  # type: ignore[override]
@@ -260,12 +282,25 @@ class GlobalPanel(Static):
     }
     """
 
+    _STICKY = (
+        "global_e2e_ms", "global_trt_host_copy_ms", "global_trt_h2d_ms",
+        "global_sem_wait_ms", "global_trt_execute_ms", "global_trt_d2h_ms",
+        "global_postprocess_ms",
+    )
+
     def __init__(self) -> None:
         super().__init__(id="global-panel")
         self._data: dict = {}
+        self._frozen: dict = {}
 
     def update_data(self, snapshot: dict) -> None:
-        self._data = snapshot
+        merged = dict(snapshot)
+        for key in self._STICKY:
+            if snapshot.get(key) is not None:
+                self._frozen[key] = snapshot[key]
+            elif key in self._frozen:
+                merged[key] = self._frozen[key]
+        self._data = merged
         self.refresh()
 
     def render(self) -> str:  # type: ignore[override]
@@ -292,6 +327,99 @@ class GlobalPanel(Static):
         ]
 
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tick selector dialog
+# ---------------------------------------------------------------------------
+
+
+class TickSelectorScreen(ModalScreen):
+    """Modal dialog for choosing seconds-per-tick."""
+
+    DEFAULT_CSS = """
+    TickSelectorScreen {
+        align: center middle;
+    }
+    #tick-dialog {
+        width: 44;
+        height: auto;
+        border: heavy $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    .dlg-title {
+        text-style: bold;
+        color: $accent;
+        padding-bottom: 1;
+    }
+    .dlg-opt {
+        color: $text;
+    }
+    .dlg-hint {
+        color: $text-muted;
+        padding-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        ("1", "pick_1", "1s/tick"),
+        ("2", "pick_2", "2s/tick"),
+        ("5", "pick_5", "5s/tick"),
+        ("0", "pick_10", "10s/tick"),
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, current: int) -> None:
+        super().__init__()
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        with Static(id="tick-dialog"):
+            yield Static("SET TICK DURATION", classes="dlg-title")
+            yield Static("  [bold]1[/bold]  →  1 second per tick",   classes="dlg-opt")
+            yield Static("  [bold]2[/bold]  →  2 seconds per tick",  classes="dlg-opt")
+            yield Static("  [bold]5[/bold]  →  5 seconds per tick",  classes="dlg-opt")
+            yield Static("  [bold]0[/bold]  →  10 seconds per tick", classes="dlg-opt")
+            yield Static(
+                f"  [dim]current: {self._current}s/tick — ESC to cancel[/dim]",
+                classes="dlg-hint",
+            )
+
+    def action_pick_1(self)  -> None: self.dismiss(1)
+    def action_pick_2(self)  -> None: self.dismiss(2)
+    def action_pick_5(self)  -> None: self.dismiss(5)
+    def action_pick_10(self) -> None: self.dismiss(10)
+    def action_cancel(self)  -> None: self.dismiss(None)
+
+
+# ---------------------------------------------------------------------------
+# Custom footer
+# ---------------------------------------------------------------------------
+
+
+class AppFooter(Static):
+    """Footer row: key hints + current tick rate."""
+
+    DEFAULT_CSS = """
+    AppFooter {
+        height: 1;
+        dock: bottom;
+        background: #111111;
+        color: $text-muted;
+        padding: 0 1;
+    }
+    """
+
+    seconds_per_tick: reactive[int] = reactive(2)
+
+    def render(self) -> str:
+        spt = self.seconds_per_tick
+        return (
+            f"[bold white]q[/bold white] Quit  "
+            f"[bold white]t[/bold white] Set Tick  "
+            f"[dim cyan]{spt}s/tick[/dim cyan]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +477,7 @@ class CondorTUI(App[None]):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("ctrl+c", "quit", "Quit"),
+        ("t", "set_tick", "Set Tick"),
     ]
 
     def __init__(self) -> None:
@@ -356,6 +485,9 @@ class CondorTUI(App[None]):
         self._snapshot: dict = {}
         self._layout_ready = False
         self._num_workers = 0
+        self._seconds_per_tick: int = 2
+        self._num_ticks: int = 60
+        self._stats_writer: asyncio.StreamWriter | None = None
 
     # ------------------------------------------------------------------
     # Layout
@@ -369,7 +501,7 @@ class CondorTUI(App[None]):
             yield GraphPanel("THROUGHPUT", "req/s", "throughput-panel")
         with Horizontal(id="workers-row"):
             pass  # Worker panels mounted dynamically on first snapshot
-        yield Footer()
+        yield AppFooter()
 
     # ------------------------------------------------------------------
     # Stats reader worker
@@ -381,6 +513,9 @@ class CondorTUI(App[None]):
         while True:
             try:
                 reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
+                self._stats_writer = writer
+                # Tell the server about our current time config immediately.
+                await self._send_time_config()
                 async for line in reader:
                     text = line.decode(errors="replace").strip()
                     if not text:
@@ -392,11 +527,43 @@ class CondorTUI(App[None]):
                     await self._update_ui(data)
                 writer.close()
             except (ConnectionRefusedError, FileNotFoundError, OSError):
-                self._update_disconnected()
-                await asyncio.sleep(2.0)
+                pass
+            finally:
+                self._stats_writer = None
+            self._update_disconnected()
+            await asyncio.sleep(2.0)
 
     def on_mount(self) -> None:
         self._read_stats()
+
+    # ------------------------------------------------------------------
+    # Tick config
+    # ------------------------------------------------------------------
+
+    async def _send_time_config(self) -> None:
+        """Push current window_s / sparkline_len config to the server."""
+        w = self._stats_writer
+        if w is None or w.is_closing():
+            return
+        window_s = self._num_ticks * self._seconds_per_tick
+        msg = json.dumps({"window_s": window_s, "sparkline_len": self._num_ticks}) + "\n"
+        try:
+            w.write(msg.encode())
+            await w.drain()
+        except Exception:
+            pass
+
+    def action_set_tick(self) -> None:
+        # push_screen_wait requires a worker context — delegate immediately.
+        self._open_tick_dialog()
+
+    @work
+    async def _open_tick_dialog(self) -> None:
+        result = await self.push_screen_wait(TickSelectorScreen(self._seconds_per_tick))
+        if result is not None:
+            self._seconds_per_tick = result
+            self.query_one(AppFooter).seconds_per_tick = result
+            await self._send_time_config()
 
     # ------------------------------------------------------------------
     # UI updates
@@ -440,17 +607,31 @@ class CondorTUI(App[None]):
         )
         self.query_one("#status-bar", StatusBar).update(status_text)
 
-        # Update sparklines
-        _SPARKLINE_LEN = 60  # must match stats._SPARKLINE_LEN
+        # Derive num_ticks from the actual sparkline widget width so the
+        # graph X-axis and metric rolling windows stay in sync.
+        try:
+            panel = self.query_one("#latency-panel", GraphPanel)
+            spark = panel.query_one(f"#{panel._spark_id}", Sparkline)
+            w = spark.size.width
+            if w > 0 and w != self._num_ticks:
+                self._num_ticks = w
+                await self._send_time_config()
+        except Exception:
+            pass
 
+        # Update sparklines — trim or left-pad to exactly _num_ticks points so
+        # the X-scale is always consistent regardless of uptime or window changes.
+        n = self._num_ticks
         lat_data = list(data.get("sparkline_latency", []))
         tput_data = list(data.get("sparkline_throughput", []))
-
-        # Pad with leading zeros so X-scale is consistent from startup
-        if len(lat_data) < _SPARKLINE_LEN:
-            lat_data = [0.0] * (_SPARKLINE_LEN - len(lat_data)) + lat_data
-        if len(tput_data) < _SPARKLINE_LEN:
-            tput_data = [0.0] * (_SPARKLINE_LEN - len(tput_data)) + tput_data
+        if len(lat_data) > n:
+            lat_data = lat_data[-n:]
+        elif len(lat_data) < n:
+            lat_data = [0.0] * (n - len(lat_data)) + lat_data
+        if len(tput_data) > n:
+            tput_data = tput_data[-n:]
+        elif len(tput_data) < n:
+            tput_data = [0.0] * (n - len(tput_data)) + tput_data
 
         lat_summary = ""
         if any(v > 0 for v in lat_data):
