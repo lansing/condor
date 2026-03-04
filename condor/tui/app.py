@@ -45,16 +45,13 @@ def _fmt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _ms(d: dict | None, field: str = "avg") -> str:
-    if d is None:
-        return "  ---"
-    return f"{d[field]:6.1f}"
+def _fmt_ms_row(d: dict) -> str:
+    """Format a cur_min_max dict as a fixed-width string.
 
-
-def _fmt_ms_row(d: dict | None) -> str:
-    if d is None:
-        return "    ---  ---  ---"
-    return f"{d['avg']:6.1f}  {d['min']:6.1f}  {d['max']:6.1f}"
+    Columns: current (no label) | min | max
+    All values are zero when the metric has no data.
+    """
+    return f"{d['cur']:6.1f}  {d['min']:6.1f}  {d['max']:6.1f}"
 
 
 # ---------------------------------------------------------------------------
@@ -201,38 +198,19 @@ class WorkerPanel(Static):
     }
     """
 
-    # Metric keys that can be None when the rolling window is empty.
-    _WORKER_STICKY = ("e2e_ms", "infer_ms", "postprocess_ms")
-    _GLOBAL_STICKY = (
-        "global_trt_host_copy_ms", "global_trt_h2d_ms", "global_sem_wait_ms",
-        "global_trt_execute_ms", "global_trt_d2h_ms",
-    )
-
     def __init__(self, worker_id: int, port: int) -> None:
         super().__init__(id=f"worker-panel-{worker_id}")
         self._worker_id = worker_id
         self._port = port
         self._data: dict = {}
         self._trt_data: dict = {}
-        self._frozen: dict = {}  # last-known non-None values
 
     def update_data(self, wdata: dict, snapshot: dict) -> None:
-        # Freeze metric values: update cache on non-None, substitute on None.
-        merged_w = dict(wdata)
-        merged_g = dict(snapshot)
-        for key in self._WORKER_STICKY:
-            if wdata.get(key) is not None:
-                self._frozen[key] = wdata[key]
-            elif key in self._frozen:
-                merged_w[key] = self._frozen[key]
-        for key in self._GLOBAL_STICKY:
-            if snapshot.get(key) is not None:
-                self._frozen[key] = snapshot[key]
-            elif key in self._frozen:
-                merged_g[key] = self._frozen[key]
-        self._data = merged_w
-        self._trt_data = merged_g
+        self._data = wdata
+        self._trt_data = snapshot
         self.refresh()
+
+    _ZERO = {"cur": 0.0, "min": 0.0, "max": 0.0}
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
@@ -240,18 +218,18 @@ class WorkerPanel(Static):
 
         inf = d.get("inference_total", 0)
         rps = d.get("req_per_sec", 0.0)
-        e2e = d.get("e2e_ms")
-        mcpy = g.get("global_trt_host_copy_ms")
-        h2d = g.get("global_trt_h2d_ms")
-        sem = g.get("global_sem_wait_ms")
-        infer = g.get("global_trt_execute_ms")
-        d2h = g.get("global_trt_d2h_ms")
-        pp = d.get("postprocess_ms")
+        e2e = d.get("e2e_ms", self._ZERO)
+        mcpy = g.get("global_trt_host_copy_ms", self._ZERO)
+        h2d = g.get("global_trt_h2d_ms", self._ZERO)
+        sem = g.get("global_sem_wait_ms", self._ZERO)
+        infer = g.get("global_trt_execute_ms", self._ZERO)
+        d2h = g.get("global_trt_d2h_ms", self._ZERO)
+        pp = d.get("postprocess_ms", self._ZERO)
 
         lines = [
             f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f} rps[/yellow]",
             f"  Inf   [green]{inf:>7,}[/green]",
-            "  [dim]          avg    min    max[/dim]",
+            "  [dim]                 min    max[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
@@ -282,41 +260,30 @@ class GlobalPanel(Static):
     }
     """
 
-    _STICKY = (
-        "global_e2e_ms", "global_trt_host_copy_ms", "global_trt_h2d_ms",
-        "global_sem_wait_ms", "global_trt_execute_ms", "global_trt_d2h_ms",
-        "global_postprocess_ms",
-    )
-
     def __init__(self) -> None:
         super().__init__(id="global-panel")
         self._data: dict = {}
-        self._frozen: dict = {}
 
     def update_data(self, snapshot: dict) -> None:
-        merged = dict(snapshot)
-        for key in self._STICKY:
-            if snapshot.get(key) is not None:
-                self._frozen[key] = snapshot[key]
-            elif key in self._frozen:
-                merged[key] = self._frozen[key]
-        self._data = merged
+        self._data = snapshot
         self.refresh()
+
+    _ZERO = {"cur": 0.0, "min": 0.0, "max": 0.0}
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
         rps = d.get("global_throughput_rps", 0.0)
-        e2e = d.get("global_e2e_ms")
-        mcpy = d.get("global_trt_host_copy_ms")
-        h2d = d.get("global_trt_h2d_ms")
-        sem = d.get("global_sem_wait_ms")
-        infer = d.get("global_trt_execute_ms")
-        d2h = d.get("global_trt_d2h_ms")
-        pp = d.get("global_postprocess_ms")
+        e2e = d.get("global_e2e_ms", self._ZERO)
+        mcpy = d.get("global_trt_host_copy_ms", self._ZERO)
+        h2d = d.get("global_trt_h2d_ms", self._ZERO)
+        sem = d.get("global_sem_wait_ms", self._ZERO)
+        infer = d.get("global_trt_execute_ms", self._ZERO)
+        d2h = d.get("global_trt_d2h_ms", self._ZERO)
+        pp = d.get("global_postprocess_ms", self._ZERO)
 
         lines = [
             f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
-            "  [dim]          avg    min    max[/dim]",
+            "  [dim]                 min    max[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",

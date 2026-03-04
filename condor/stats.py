@@ -75,6 +75,45 @@ class _RollingWindow:
             self._evict(now)
             return len(self._data) / self._window_s
 
+    def count_in_window(self, window_s: float) -> int:
+        """Count events in the most recent *window_s* seconds."""
+        now = time.monotonic()
+        cutoff = now - window_s
+        with self._lock:
+            return sum(1 for t, _ in self._data if t >= cutoff)
+
+    def stats_for_window(self, window_s: float) -> dict[str, float] | None:
+        """Return {avg, min, max} for events in the most recent *window_s* seconds."""
+        now = time.monotonic()
+        cutoff = now - window_s
+        with self._lock:
+            vals = [v for t, v in self._data if t >= cutoff]
+        if not vals:
+            return None
+        n = len(vals)
+        return {
+            "avg": round(sum(vals) / n, 2),
+            "min": round(min(vals), 2),
+            "max": round(max(vals), 2),
+        }
+
+    def cur_min_max(self, tick_s: float) -> dict[str, float]:
+        """Return {cur, min, max} — always a dict, zeros when no data.
+
+        cur: avg of values in the most recent *tick_s* seconds (instantaneous).
+        min/max: extremes over the full rolling window.
+        """
+        now = time.monotonic()
+        cutoff_cur = now - tick_s
+        with self._lock:
+            self._evict(now)
+            all_vals = [v for _, v in self._data]
+            cur_vals = [v for t, v in self._data if t >= cutoff_cur]
+        cur = round(sum(cur_vals) / len(cur_vals), 2) if cur_vals else 0.0
+        mn = round(min(all_vals), 2) if all_vals else 0.0
+        mx = round(max(all_vals), 2) if all_vals else 0.0
+        return {"cur": cur, "min": mn, "max": mx}
+
     def set_window(self, window_s: float) -> None:
         """Change the rolling window duration. Old data outside the new window
         will be evicted on the next stats() / rate() call."""
@@ -126,7 +165,7 @@ class StatsCollector:
         self._trt_execute = _RollingWindow()
         self._trt_d2h = _RollingWindow()
 
-        # Sparkline history — appended once per second by _maybe_update_sparklines
+        # Sparkline history — appended once per tick by _maybe_update_sparklines
         self._sparkline_latency: collections.deque[float] = collections.deque(
             maxlen=_SPARKLINE_LEN
         )
@@ -134,6 +173,7 @@ class StatsCollector:
             maxlen=_SPARKLINE_LEN
         )
         self._last_sparkline = 0.0
+        self._sparkline_tick_s = 2.0   # seconds between sparkline points; updated by set_window_config
         self._sparkline_lock = threading.Lock()
 
     # --- helpers -----------------------------------------------------------
@@ -243,13 +283,16 @@ class StatsCollector:
             self._sparkline_throughput = collections.deque(
                 old_tput[-sparkline_len:], maxlen=sparkline_len
             )
+            self._sparkline_tick_s = window_s / sparkline_len
 
     # --- sparkline ---------------------------------------------------------
 
     def _maybe_update_sparklines(self) -> None:
         now = time.monotonic()
         with self._sparkline_lock:
-            if now - self._last_sparkline < 1.0:
+            tick_s = self._sparkline_tick_s
+            elapsed = now - self._last_sparkline
+            if elapsed < tick_s:
                 return
             self._last_sparkline = now
 
@@ -257,21 +300,26 @@ class StatsCollector:
         with self._lock:
             worker_refs = list(self._workers.values())
 
+        # Instantaneous measurements: count events that arrived in the last `elapsed` seconds.
         all_e2e: list[float] = []
-        total_rps = 0.0
+        total_count = 0
         for w in worker_refs:
-            s = w.e2e.stats()
+            s = w.e2e.stats_for_window(elapsed)
             if s:
                 all_e2e.append(s["avg"])
-            total_rps += w.e2e.rate()
+            total_count += w.e2e.count_in_window(elapsed)
 
-        # Always append to sparklines so they scroll smoothly at 1 Hz
+        # Instantaneous throughput = events in elapsed window / elapsed seconds
+        instant_rps = round(total_count / elapsed, 2) if elapsed > 0 else 0.0
+
+        # Always append so sparklines scroll smoothly each tick
         if all_e2e:
             self._sparkline_latency.append(round(sum(all_e2e) / len(all_e2e), 1))
         else:
-            # If no data, repeat the last value (or 0 if empty)
-            self._sparkline_latency.append(self._sparkline_latency[-1] if self._sparkline_latency else 0.0)
-        self._sparkline_throughput.append(round(total_rps, 2))
+            self._sparkline_latency.append(
+                self._sparkline_latency[-1] if self._sparkline_latency else 0.0
+            )
+        self._sparkline_throughput.append(instant_rps)
 
     # --- snapshot ----------------------------------------------------------
 
@@ -280,6 +328,8 @@ class StatsCollector:
         self._maybe_update_sparklines()
 
         now = time.monotonic()
+        tick_s = self._sparkline_tick_s
+
         with self._lock:
             workers_snap: dict[str, Any] = {}
             for wid, w in self._workers.items():
@@ -287,9 +337,9 @@ class StatsCollector:
                     "requests_total": w.requests_total,
                     "inference_total": w.inference_total,
                     "req_per_sec": round(w.e2e.rate(), 2),
-                    "e2e_ms": w.e2e.stats(),
-                    "infer_ms": w.infer.stats(),
-                    "postprocess_ms": w.postprocess.stats(),
+                    "e2e_ms": w.e2e.cur_min_max(tick_s),
+                    "infer_ms": w.infer.cur_min_max(tick_s),
+                    "postprocess_ms": w.postprocess.cur_min_max(tick_s),
                 }
             cfg = {
                 "provider": self._provider,
@@ -301,54 +351,23 @@ class StatsCollector:
             inference_concurrent = self._inference_concurrent
             uptime = now - self._start
 
-        # Compute global e2e from per-worker windows
-        e2e_stats = [
-            workers_snap[w]["e2e_ms"]
-            for w in workers_snap
-            if workers_snap[w]["e2e_ms"] is not None
-        ]
-        if e2e_stats:
-            global_e2e: dict[str, float] | None = {
-                "avg": round(sum(s["avg"] for s in e2e_stats) / len(e2e_stats), 2),
-                "min": round(min(s["min"] for s in e2e_stats), 2),
-                "max": round(max(s["max"] for s in e2e_stats), 2),
+        def _agg(stats_list: list[dict]) -> dict[str, float]:
+            """Aggregate cur_min_max dicts across workers; ignore workers with no data."""
+            active = [s for s in stats_list if s["max"] > 0]
+            if not active:
+                return {"cur": 0.0, "min": 0.0, "max": 0.0}
+            return {
+                "cur": round(sum(s["cur"] for s in active) / len(active), 2),
+                "min": round(min(s["min"] for s in active), 2),
+                "max": round(max(s["max"] for s in active), 2),
             }
-        else:
-            global_e2e = None
 
+        global_e2e = _agg([workers_snap[w]["e2e_ms"] for w in workers_snap])
+        global_infer = _agg([workers_snap[w]["infer_ms"] for w in workers_snap])
+        global_pp = _agg([workers_snap[w]["postprocess_ms"] for w in workers_snap])
         global_rps = round(
             sum(workers_snap[w]["req_per_sec"] for w in workers_snap), 2
         )
-
-        # Compute global infer from per-worker windows
-        infer_stats = [
-            workers_snap[w]["infer_ms"]
-            for w in workers_snap
-            if workers_snap[w]["infer_ms"] is not None
-        ]
-        if infer_stats:
-            global_infer: dict[str, float] | None = {
-                "avg": round(sum(s["avg"] for s in infer_stats) / len(infer_stats), 2),
-                "min": round(min(s["min"] for s in infer_stats), 2),
-                "max": round(max(s["max"] for s in infer_stats), 2),
-            }
-        else:
-            global_infer = None
-
-        # Compute global postprocess from per-worker windows
-        pp_stats = [
-            workers_snap[w]["postprocess_ms"]
-            for w in workers_snap
-            if workers_snap[w]["postprocess_ms"] is not None
-        ]
-        if pp_stats:
-            global_pp: dict[str, float] | None = {
-                "avg": round(sum(s["avg"] for s in pp_stats) / len(pp_stats), 2),
-                "min": round(min(s["min"] for s in pp_stats), 2),
-                "max": round(max(s["max"] for s in pp_stats), 2),
-            }
-        else:
-            global_pp = None
 
         return {
             "config": cfg,
@@ -359,11 +378,11 @@ class StatsCollector:
             "workers": workers_snap,
             "global_e2e_ms": global_e2e,
             "global_throughput_rps": global_rps,
-            "global_sem_wait_ms": self._sem_wait.stats(),
-            "global_trt_host_copy_ms": self._trt_host_copy.stats(),
-            "global_trt_h2d_ms": self._trt_h2d.stats(),
-            "global_trt_execute_ms": self._trt_execute.stats(),
-            "global_trt_d2h_ms": self._trt_d2h.stats(),
+            "global_sem_wait_ms": self._sem_wait.cur_min_max(tick_s),
+            "global_trt_host_copy_ms": self._trt_host_copy.cur_min_max(tick_s),
+            "global_trt_h2d_ms": self._trt_h2d.cur_min_max(tick_s),
+            "global_trt_execute_ms": self._trt_execute.cur_min_max(tick_s),
+            "global_trt_d2h_ms": self._trt_d2h.cur_min_max(tick_s),
             "global_infer_ms": global_infer,
             "global_postprocess_ms": global_pp,
             "sparkline_latency": list(self._sparkline_latency),
