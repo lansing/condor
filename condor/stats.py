@@ -100,7 +100,10 @@ class _RollingWindow:
     def cur_min_max(self, tick_s: float) -> dict[str, float]:
         """Return {cur, min, max} — always a dict, zeros when no data.
 
-        cur: avg of values in the most recent *tick_s* seconds (instantaneous).
+        cur: avg of values in the most recent *tick_s* seconds.  Falls back to
+             the full-window average when no events arrived in the tick window
+             (burst / low-rate traffic).  Returns 0.0 only when the full window
+             is empty (genuine 0 rps condition).
         min/max: extremes over the full rolling window.
         """
         now = time.monotonic()
@@ -109,10 +112,15 @@ class _RollingWindow:
             self._evict(now)
             all_vals = [v for _, v in self._data]
             cur_vals = [v for t, v in self._data if t >= cutoff_cur]
-        cur = round(sum(cur_vals) / len(cur_vals), 2) if cur_vals else 0.0
-        mn = round(min(all_vals), 2) if all_vals else 0.0
-        mx = round(max(all_vals), 2) if all_vals else 0.0
-        return {"cur": cur, "min": mn, "max": mx}
+        if not all_vals:
+            return {"cur": 0.0, "min": 0.0, "max": 0.0}
+        source = cur_vals if cur_vals else all_vals
+        cur = round(sum(source) / len(source), 2)
+        return {
+            "cur": cur,
+            "min": round(min(all_vals), 2),
+            "max": round(max(all_vals), 2),
+        }
 
     def set_window(self, window_s: float) -> None:
         """Change the rolling window duration. Old data outside the new window
@@ -172,6 +180,13 @@ class StatsCollector:
         self._sparkline_throughput: collections.deque[float] = collections.deque(
             maxlen=_SPARKLINE_LEN
         )
+        # Per-pipeline-stage sparklines (parallel to _sparkline_latency)
+        self._sparkline_mcpy:  collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
+        self._sparkline_h2d:   collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
+        self._sparkline_swait: collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
+        self._sparkline_exec:  collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
+        self._sparkline_d2h:   collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
+        self._sparkline_pp:    collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
         self._last_sparkline = 0.0
         self._sparkline_tick_s = 2.0   # seconds between sparkline points; updated by set_window_config
         self._sparkline_lock = threading.Lock()
@@ -283,6 +298,12 @@ class StatsCollector:
             self._sparkline_throughput = collections.deque(
                 old_tput[-sparkline_len:], maxlen=sparkline_len
             )
+            for attr in (
+                "_sparkline_mcpy", "_sparkline_h2d", "_sparkline_swait",
+                "_sparkline_exec", "_sparkline_d2h", "_sparkline_pp",
+            ):
+                old = list(getattr(self, attr))
+                setattr(self, attr, collections.deque(old[-sparkline_len:], maxlen=sparkline_len))
             self._sparkline_tick_s = window_s / sparkline_len
 
     # --- sparkline ---------------------------------------------------------
@@ -312,6 +333,15 @@ class StatsCollector:
         # Instantaneous throughput = events in elapsed window / elapsed seconds
         instant_rps = round(total_count / elapsed, 2) if elapsed > 0 else 0.0
 
+        # Per-stage instantaneous values for this tick
+        def _stage_avg(rw: _RollingWindow) -> float:
+            s = rw.stats_for_window(elapsed)
+            return round(s["avg"], 1) if s else 0.0
+
+        pp_stats = [w.postprocess.stats_for_window(elapsed) for w in worker_refs]
+        active_pp = [s["avg"] for s in pp_stats if s]
+        pp_val = round(sum(active_pp) / len(active_pp), 1) if active_pp else 0.0
+
         # Always append so sparklines scroll smoothly each tick
         if all_e2e:
             self._sparkline_latency.append(round(sum(all_e2e) / len(all_e2e), 1))
@@ -320,6 +350,12 @@ class StatsCollector:
                 self._sparkline_latency[-1] if self._sparkline_latency else 0.0
             )
         self._sparkline_throughput.append(instant_rps)
+        self._sparkline_mcpy.append(_stage_avg(self._trt_host_copy))
+        self._sparkline_h2d.append(_stage_avg(self._trt_h2d))
+        self._sparkline_swait.append(_stage_avg(self._sem_wait))
+        self._sparkline_exec.append(_stage_avg(self._trt_execute))
+        self._sparkline_d2h.append(_stage_avg(self._trt_d2h))
+        self._sparkline_pp.append(pp_val)
 
     # --- snapshot ----------------------------------------------------------
 
@@ -387,6 +423,14 @@ class StatsCollector:
             "global_postprocess_ms": global_pp,
             "sparkline_latency": list(self._sparkline_latency),
             "sparkline_throughput": list(self._sparkline_throughput),
+            "sparkline_stages": {
+                "mcpy":  list(self._sparkline_mcpy),
+                "h2d":   list(self._sparkline_h2d),
+                "swait": list(self._sparkline_swait),
+                "exec":  list(self._sparkline_exec),
+                "d2h":   list(self._sparkline_d2h),
+                "pp":    list(self._sparkline_pp),
+            },
         }
 
 

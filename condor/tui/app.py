@@ -45,6 +45,113 @@ def _fmt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+# ---------------------------------------------------------------------------
+# Stacked-bar sparkline — stage colours and helpers
+# ---------------------------------------------------------------------------
+
+# Easy to reconfigure: change a colour here and it applies everywhere.
+STAGE_COLORS: dict[str, str] = {
+    "mcpy":  "yellow",
+    "h2d":   "cyan",
+    "swait": "red",
+    "exec":  "blue",
+    "d2h":   "magenta",
+    "pp":    "green",
+}
+# Pipeline execution order — determines top-to-bottom stack order in the bar.
+STAGE_ORDER: list[str] = ["mcpy", "h2d", "swait", "exec", "d2h", "pp"]
+_BLOCK = "█"
+_BASELINE_CHAR = "▁"
+_BASELINE_COLOR = "_baseline"  # sentinel — not a real Rich colour
+
+
+def _alloc_rows(vals: dict[str, float], bar_h: int) -> dict[str, int]:
+    """Allocate *bar_h* rows to stages proportionally (descending-first greedy)."""
+    D = sum(vals.values())
+    if D == 0 or bar_h == 0:
+        return {s: 0 for s in vals}
+
+    sorted_stages = sorted(vals.items(), key=lambda x: x[1], reverse=True)
+    rows: dict[str, int] = {s: 0 for s in vals}
+    used = 0
+    for stage, v in sorted_stages:
+        r = round(v / D * bar_h)
+        r = min(r, bar_h - used)
+        rows[stage] = r
+        used += r
+        if used >= bar_h:
+            break
+    # Rounding shortfall → give remainder to largest stage
+    if used < bar_h and sorted_stages:
+        rows[sorted_stages[0][0]] += bar_h - used
+    return rows
+
+
+def _build_column(
+    vals: dict[str, float], bar_h: int, e2e: float, peak: float
+) -> list[str]:
+    """Return a list of *bar_h* colour strings (or '' for empty) for one bar column.
+
+    Row 0 = top of bar, row bar_h-1 = bottom.
+    When stage data is available (TRT), fills full height proportionally.
+    Fallback (no stage data): single-colour E2E bar scaled to peak height.
+    Empty code-path marker for future per-provider customisation is the D==0 branch.
+    """
+    col: list[str] = [""] * bar_h
+    if bar_h == 0:
+        return col
+
+    D = sum(vals.values())
+    if D == 0:
+        # --- Fallback / future per-provider hook ---
+        # Currently: single E2E bar scaled by e2e/peak (absolute height).
+        # Replace this block to add provider-specific stacked behaviour.
+        if e2e > 0 and peak > 0:
+            n_rows = max(1, round(e2e / peak * bar_h))
+            n_rows = min(n_rows, bar_h)
+            for r in range(bar_h - n_rows, bar_h):
+                col[r] = STAGE_COLORS["exec"]
+        else:
+            # No data at all → gray baseline marker at bottom row
+            if bar_h > 0:
+                col[bar_h - 1] = _BASELINE_COLOR
+        return col
+
+    # Full stacked mode: allocate rows in pipeline order top → bottom.
+    alloc = _alloc_rows(vals, bar_h)
+    cur_row = 0
+    for stage in STAGE_ORDER:
+        n = alloc.get(stage, 0)
+        if n > 0:
+            color = STAGE_COLORS[stage]
+            for r in range(cur_row, min(cur_row + n, bar_h)):
+                col[r] = color
+            cur_row += n
+    return col
+
+
+def _render_bar_row(row: list[str]) -> str:
+    """Convert a list of colour strings to a Rich-markup line of block characters."""
+    if not row:
+        return ""
+    parts: list[str] = []
+    i = 0
+    while i < len(row):
+        color = row[i]
+        j = i + 1
+        while j < len(row) and row[j] == color:
+            j += 1
+        span = j - i
+        if color == _BASELINE_COLOR:
+            parts.append(f"[dim]{_BASELINE_CHAR * span}[/dim]")
+        elif color:
+            parts.append(f"[{color}]{_BLOCK * span}[/{color}]")
+        else:
+            parts.append(" " * span)
+        i = j
+    return "".join(parts)
+
+
 def _fmt_ms_row(d: dict) -> str:
     """Format a cur_min_max dict as a fixed-width string.
 
@@ -116,6 +223,99 @@ class StatusBar(Static):
         padding: 0 1;
     }
     """
+
+
+# ---------------------------------------------------------------------------
+# Stacked-bar latency panel
+# ---------------------------------------------------------------------------
+
+
+class StackedBarPanel(Static):
+    """E2E latency sparkline rendered as a stacked pipeline-stage bar chart.
+
+    Each vertical bar represents one tick.  Its height segments show the
+    relative share of each pipeline stage (MCpy → H2D → SWait → Exec → D2H →
+    PostP) for that tick, using the colours in STAGE_COLORS.
+
+    When no stage data is available (non-TRT providers), falls back to a
+    single-colour E2E bar scaled to the peak value.
+    """
+
+    DEFAULT_CSS = """
+    StackedBarPanel {
+        width: 1fr;
+        height: 1fr;
+        border: heavy $success;
+        padding: 0 1;
+        background: $background;
+        color: $success;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="latency-panel")
+        self._lat_data: list[float] = []
+        self._stages: dict[str, list[float]] = {}
+        self._n: int = 60
+        self._summary: str = ""
+
+    def update_data(
+        self,
+        lat_data: list[float],
+        stages: dict[str, list[float]],
+        n: int,
+        summary: str,
+    ) -> None:
+        self._lat_data = lat_data
+        self._stages = stages
+        self._n = n
+        self._summary = summary
+        self.refresh()
+
+    def render(self) -> str:  # type: ignore[override]
+        lat = self._lat_data
+        stages = self._stages
+
+        # self.size inside render() is INSIDE the border (border already excluded)
+        # but still includes padding (0 vertical, 1 left + 1 right).
+        bar_h = max(1, self.size.height - 2)   # content_h - title(1) - summary(1)
+        bar_w = max(1, self.size.width - 2)     # content_w - padding left(1) - right(1)
+
+        peak = max(lat) if lat else 0.0
+        title = f" ▶ E2E LATENCY  [dim]↑ {peak:.0f}[/dim]"
+
+        if not lat:
+            return f"{title}\n{self._summary}"
+
+        # Align to rightmost n_cols ticks; left-pad to bar_w with baseline markers
+        n_cols = min(bar_w, len(lat))
+        offset = len(lat) - n_cols
+        lat_slice = lat[offset:]
+        n_blank = bar_w - n_cols
+
+        # Grid is always bar_w wide so rendered rows fill the content area exactly
+        grid: list[list[str]] = [[""] * bar_w for _ in range(bar_h)]
+        # Blank left-padding columns get a baseline marker at the bottom row
+        for col in range(n_blank):
+            grid[bar_h - 1][col] = _BASELINE_COLOR
+        # Real data in rightmost n_cols columns
+        for col_idx in range(n_cols):
+            col = n_blank + col_idx
+            t_idx = offset + col_idx
+            vals: dict[str, float] = {
+                stage: (stages.get(stage, [])[t_idx]
+                        if t_idx < len(stages.get(stage, [])) else 0.0)
+                for stage in STAGE_ORDER
+            }
+            col_colors = _build_column(vals, bar_h, lat_slice[col_idx], peak)
+            for row in range(bar_h):
+                grid[row][col] = col_colors[row]
+
+        lines = [title]
+        for row in grid:
+            lines.append(_render_bar_row(row))
+        lines.append(f"[dim]{self._summary}[/dim]")
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -414,14 +614,6 @@ class CondorTUI(App[None]):
         height: 1fr;
     }
 
-    #graphs-row #latency-panel {
-        border: heavy $success;
-    }
-
-    #graphs-row #latency-panel > .title {
-        color: $success;
-    }
-
     #graphs-row #throughput-panel {
         border: heavy $accent;
     }
@@ -464,7 +656,7 @@ class CondorTUI(App[None]):
         yield HeaderWidget()
         yield StatusBar("● CONNECTING…", id="status-bar")
         with Horizontal(id="graphs-row"):
-            yield GraphPanel("E2E LATENCY", "ms", "latency-panel")
+            yield StackedBarPanel()
             yield GraphPanel("THROUGHPUT", "req/s", "throughput-panel")
         with Horizontal(id="workers-row"):
             pass  # Worker panels mounted dynamically on first snapshot
@@ -574,12 +766,12 @@ class CondorTUI(App[None]):
         )
         self.query_one("#status-bar", StatusBar).update(status_text)
 
-        # Derive num_ticks from the actual sparkline widget width so the
+        # Derive num_ticks from the latency panel's content width so the
         # graph X-axis and metric rolling windows stay in sync.
         try:
-            panel = self.query_one("#latency-panel", GraphPanel)
-            spark = panel.query_one(f"#{panel._spark_id}", Sparkline)
-            w = spark.size.width
+            lat_panel = self.query_one("#latency-panel", StackedBarPanel)
+            # Content width = outer_w - border(2) - padding(2)
+            w = lat_panel.size.width - 4
             if w > 0 and w != self._num_ticks:
                 self._num_ticks = w
                 await self._send_time_config()
@@ -608,7 +800,21 @@ class CondorTUI(App[None]):
                 f"avg {sum(nonzero)/len(nonzero):.1f}  "
                 f"peak {max(lat_data):.1f}"
             )
-        self.query_one("#latency-panel", GraphPanel).update_data(lat_data, lat_summary)
+
+        # Extract and pad per-stage sparkline histories to n ticks
+        stages_raw = data.get("sparkline_stages", {})
+        stages: dict[str, list[float]] = {}
+        for stage in STAGE_ORDER:
+            hist = list(stages_raw.get(stage, []))
+            if len(hist) > n:
+                hist = hist[-n:]
+            elif len(hist) < n:
+                hist = [0.0] * (n - len(hist)) + hist
+            stages[stage] = hist
+
+        self.query_one("#latency-panel", StackedBarPanel).update_data(
+            lat_data, stages, n, lat_summary
+        )
 
         tput_summary = ""
         if any(v > 0 for v in tput_data):
