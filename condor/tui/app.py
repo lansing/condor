@@ -92,34 +92,33 @@ def _build_column(
 ) -> list[str]:
     """Return a list of *bar_h* colour strings (or '' for empty) for one bar column.
 
-    Row 0 = top of bar, row bar_h-1 = bottom.
-    When stage data is available (TRT), fills full height proportionally.
-    Fallback (no stage data): single-colour E2E bar scaled to peak height.
-    Empty code-path marker for future per-provider customisation is the D==0 branch.
+    Row 0 = top, row bar_h-1 = bottom.  Bar height is scaled by e2e/peak
+    (bottom-aligned).  Within the bar, segments are proportional to stage shares.
     """
     col: list[str] = [""] * bar_h
     if bar_h == 0:
         return col
 
+    # No data → baseline marker only
+    if e2e <= 0 or peak <= 0:
+        col[bar_h - 1] = _BASELINE_COLOR
+        return col
+
+    # Scale total bar height relative to peak (bottom-aligned)
+    bar_total = max(1, min(bar_h, round(e2e / peak * bar_h)))
+    start_row = bar_h - bar_total
+
     D = sum(vals.values())
     if D == 0:
         # --- Fallback / future per-provider hook ---
-        # Currently: single E2E bar scaled by e2e/peak (absolute height).
-        # Replace this block to add provider-specific stacked behaviour.
-        if e2e > 0 and peak > 0:
-            n_rows = max(1, round(e2e / peak * bar_h))
-            n_rows = min(n_rows, bar_h)
-            for r in range(bar_h - n_rows, bar_h):
-                col[r] = STAGE_COLORS["exec"]
-        else:
-            # No data at all → gray baseline marker at bottom row
-            if bar_h > 0:
-                col[bar_h - 1] = _BASELINE_COLOR
+        # No stage data (non-TRT): single-colour E2E bar, height already scaled.
+        for r in range(start_row, bar_h):
+            col[r] = STAGE_COLORS["exec"]
         return col
 
-    # Full stacked mode: allocate rows in pipeline order top → bottom.
-    alloc = _alloc_rows(vals, bar_h)
-    cur_row = 0
+    # Full stacked mode: allocate bar_total rows proportionally, bottom-aligned.
+    alloc = _alloc_rows(vals, bar_total)
+    cur_row = start_row
     for stage in STAGE_ORDER:
         n = alloc.get(stage, 0)
         if n > 0:
