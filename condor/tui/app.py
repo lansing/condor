@@ -27,7 +27,7 @@ from textual.widget import Widget
 from textual.widgets import Sparkline, Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
-from .art import CONDOR_LOGO, build_combined_logo, get_provider_logo, get_bird_frame
+from .art import CONDOR_LOGO, build_combined_logo, get_bird_frame, get_provider_logo
 
 # Allow override via env var so the host TUI can reach a socket that is
 # bind-mounted from a running Docker container (see docker-compose.yaml).
@@ -51,12 +51,12 @@ def _fmt_time(seconds: float) -> str:
 
 # Easy to reconfigure: change a colour here and it applies everywhere.
 STAGE_COLORS: dict[str, str] = {
-    "mcpy":  "yellow",
-    "h2d":   "cyan",
+    "mcpy": "yellow",
+    "h2d": "cyan",
     "swait": "red",
-    "exec":  "blue",
-    "d2h":   "magenta",
-    "pp":    "green",
+    "exec": "blue",
+    "d2h": "magenta",
+    "pp": "green",
 }
 # Pipeline execution order — determines top-to-bottom stack order in the bar.
 STAGE_ORDER: list[str] = ["mcpy", "h2d", "swait", "exec", "d2h", "pp"]
@@ -275,10 +275,11 @@ class StackedBarPanel(Static):
         lat = self._lat_data
         stages = self._stages
 
-        # self.size inside render() is INSIDE the border (border already excluded)
-        # but still includes padding (0 vertical, 1 left + 1 right).
-        bar_h = max(1, self.size.height - 2)   # content_h - title(1) - summary(1)
-        bar_w = max(1, self.size.width - 2)     # content_w - padding left(1) - right(1)
+        # self.size in render() is the CONTENT area (inside border and padding).
+        # bar_h: content_h - title(1) - summary(1)
+        # bar_w: content_w directly — matches _num_ticks = lat_panel.size.width - 4 in _update_ui
+        bar_h = max(1, self.size.height - 2)
+        bar_w = max(1, self.size.width)
 
         peak = max(lat) if lat else 0.0
         title = f" ▶ E2E LATENCY  [dim]↑ {peak:.0f}[/dim]"
@@ -302,8 +303,11 @@ class StackedBarPanel(Static):
             col = n_blank + col_idx
             t_idx = offset + col_idx
             vals: dict[str, float] = {
-                stage: (stages.get(stage, [])[t_idx]
-                        if t_idx < len(stages.get(stage, [])) else 0.0)
+                stage: (
+                    stages.get(stage, [])[t_idx]
+                    if t_idx < len(stages.get(stage, []))
+                    else 0.0
+                )
                 for stage in STAGE_ORDER
             }
             col_colors = _build_column(vals, bar_h, lat_slice[col_idx], peak)
@@ -543,20 +547,29 @@ class TickSelectorScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Static(id="tick-dialog"):
             yield Static("SET TICK DURATION", classes="dlg-title")
-            yield Static("  [bold]1[/bold]  →  1 second per tick",   classes="dlg-opt")
-            yield Static("  [bold]2[/bold]  →  2 seconds per tick",  classes="dlg-opt")
-            yield Static("  [bold]5[/bold]  →  5 seconds per tick",  classes="dlg-opt")
+            yield Static("  [bold]1[/bold]  →  1 second per tick", classes="dlg-opt")
+            yield Static("  [bold]2[/bold]  →  2 seconds per tick", classes="dlg-opt")
+            yield Static("  [bold]5[/bold]  →  5 seconds per tick", classes="dlg-opt")
             yield Static("  [bold]0[/bold]  →  10 seconds per tick", classes="dlg-opt")
             yield Static(
                 f"  [dim]current: {self._current}s/tick — ESC to cancel[/dim]",
                 classes="dlg-hint",
             )
 
-    def action_pick_1(self)  -> None: self.dismiss(1)
-    def action_pick_2(self)  -> None: self.dismiss(2)
-    def action_pick_5(self)  -> None: self.dismiss(5)
-    def action_pick_10(self) -> None: self.dismiss(10)
-    def action_cancel(self)  -> None: self.dismiss(None)
+    def action_pick_1(self) -> None:
+        self.dismiss(1)
+
+    def action_pick_2(self) -> None:
+        self.dismiss(2)
+
+    def action_pick_5(self) -> None:
+        self.dismiss(5)
+
+    def action_pick_10(self) -> None:
+        self.dismiss(10)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +717,9 @@ class CondorTUI(App[None]):
         if w is None or w.is_closing():
             return
         window_s = self._num_ticks * self._seconds_per_tick
-        msg = json.dumps({"window_s": window_s, "sparkline_len": self._num_ticks}) + "\n"
+        msg = (
+            json.dumps({"window_s": window_s, "sparkline_len": self._num_ticks}) + "\n"
+        )
         try:
             w.write(msg.encode())
             await w.drain()
@@ -796,7 +811,7 @@ class CondorTUI(App[None]):
             nonzero = [v for v in lat_data if v > 0]
             lat_summary = (
                 f"  now {lat_data[-1]:.1f}  "
-                f"avg {sum(nonzero)/len(nonzero):.1f}  "
+                f"avg {sum(nonzero) / len(nonzero):.1f}  "
                 f"peak {max(lat_data):.1f}"
             )
 
@@ -820,7 +835,7 @@ class CondorTUI(App[None]):
             nonzero = [v for v in tput_data if v > 0]
             tput_summary = (
                 f"  now {tput_data[-1]:.1f}  "
-                f"avg {sum(nonzero)/len(nonzero):.1f}  "
+                f"avg {sum(nonzero) / len(nonzero):.1f}  "
                 f"peak {max(tput_data):.1f}"
             )
         self.query_one("#throughput-panel", GraphPanel).update_data(

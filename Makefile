@@ -4,6 +4,7 @@
         docker-build-openvino docker-run-openvino \
         docker-build-tensorrt docker-rebuild-tensorrt \
         docker-run-tensorrt docker-shell-tensorrt docker-test-tensorrt \
+        docker-build-tensorrt-build docker-run-tensorrt-build docker-shell-tensorrt-build \
         install-openvino install-onnxruntime-openvino \
         install-observability-local install-observability-otlp \
         install-tui run-tui tui-host tui-docker
@@ -77,7 +78,8 @@ tui-docker:
 IMAGE_ONNX      ?= condor:onnxruntime
 IMAGE_ONNX_CUDA ?= condor:onnxruntime-cuda
 IMAGE_OPENVINO  ?= condor:openvino
-IMAGE_TENSORRT  ?= condor:tensorrt
+IMAGE_TENSORRT       ?= condor:tensorrt
+IMAGE_TENSORRT_BUILD ?= condor:tensorrt-build
 
 # Override models/config mount paths:
 #   make docker-run-tensorrt MODELS_DIR=/data/models CONFIG_DIR=/data/config
@@ -150,10 +152,15 @@ docker-run-openvino:
 	  -v $(PWD)/config:/app/config \
 	  $(IMAGE_OPENVINO)
 
-# ── TensorRT backend ───────────────────────────────────────────────────────────
+# ── TensorRT backend — lean inference image (default) ─────────────────────────
 #
 # Requires: NVIDIA driver on the host + Docker with NVIDIA Container Toolkit.
 # NEVER run without --runtime nvidia.  NEVER install TensorRT on the host.
+#
+# Multi-stage build from nvcr.io/nvidia/cuda:13.1.1-base-ubuntu24.04.
+# Copies only the TRT/cuDNN/cuBLAS runtime .so files needed for inference;
+# builder-resource files (~1.82 GB) and unneeded CUDA math libs are excluded.
+# trtexec is included for smoke-testing (see Dockerfile to remove it later).
 
 docker-build-tensorrt:
 	docker build \
@@ -161,11 +168,10 @@ docker-build-tensorrt:
 	  -t $(IMAGE_TENSORRT) \
 	  .
 
-# Force a clean rebuild — pulls the latest NGC base image and skips layer cache.
+# Force a clean rebuild — skips layer cache.
 docker-rebuild-tensorrt:
 	docker build \
 	  --no-cache \
-	  --pull \
 	  -f docker/tensorrt/Dockerfile \
 	  -t $(IMAGE_TENSORRT) \
 	  .
@@ -187,3 +193,27 @@ docker-test-tensorrt:
 	  --entrypoint python \
 	  $(IMAGE_TENSORRT) \
 	  -m pytest tests/ -v
+
+# ── TensorRT build image (full NGC base, includes engine builder) ──────────────
+#
+# Use this when you need to compile .engine files from ONNX models.
+# Based on nvcr.io/nvidia/tensorrt:26.01-py3 (~10 GB); includes all TRT builder
+# resources, nvcc, and the full CUDA toolkit.
+
+docker-build-tensorrt-build:
+	docker build \
+	  -f docker/tensorrt/Dockerfile.build \
+	  -t $(IMAGE_TENSORRT_BUILD) \
+	  .
+
+docker-run-tensorrt-build:
+	docker run --rm -it --runtime nvidia \
+	  $(call port_flags,$(NUM_WORKERS),$(BASE_PORT)) \
+	  -v $(MODELS_DIR):/app/models \
+	  -v $(CONFIG_DIR):/app/config \
+	  $(IMAGE_TENSORRT_BUILD)
+
+docker-shell-tensorrt-build:
+	docker run --rm -it --runtime nvidia \
+	  --entrypoint bash \
+	  $(IMAGE_TENSORRT_BUILD)
