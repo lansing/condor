@@ -1,0 +1,153 @@
+name: CI / Publish
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  issue_comment:
+    types: [created]
+
+jobs:
+
+  # ── Tests ────────────────────────────────────────────────────────────────────
+  # Runs on every PR and every push to master.
+  # No GPU needed — TRT_SUPPORT = False when tensorrt is not installed;
+  # the test suite falls back to the ONNX mock path.
+  test:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --no-dev --extra tui
+      - run: uv run pytest tests/ -v
+
+  # ── Release (master push only) ───────────────────────────────────────────────
+  # Computes a date-based version tag, pushes the git tag, and builds + pushes
+  # the condor image to GHCR tagged with the version and `latest`.
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push git tag
+      packages: write   # push to GHCR
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full tag history for version computation
+
+      - name: Compute version
+        id: version
+        run: |
+          DATE=$(date -u +%y.%m.%d)
+          git fetch --tags --quiet
+          LAST=$(git tag -l "${DATE}.*" | sort -V | tail -1)
+          if [ -z "$LAST" ]; then SEQ=0
+          else SEQ=$(echo "$LAST" | awk -F. '{print $4}'); SEQ=$((SEQ+1)); fi
+          VERSION="${DATE}.${SEQ}"
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version ${VERSION}"
+
+      - name: Create and push git tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.version.outputs.VERSION }}
+          git push origin ${{ steps.version.outputs.VERSION }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/tensorrt/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to:   type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=min
+
+  # ── PR image build (triggered by /build-image comment) ──────────────────────
+  # Builds the condor image from the PR's HEAD commit and pushes it to GHCR
+  # tagged with the abbreviated commit hash (e.g. ghcr.io/lansing/condor:abc1234).
+  # Usage: post a comment containing exactly `/build-image` on any open PR.
+  pr-build:
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, '/build-image')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write   # post status comment back to the PR
+
+    steps:
+      - name: Get PR head info
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
+          SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
+          BRANCH=$(echo "$PR_JSON" | jq -r '.head.ref')
+          echo "sha=${SHA}"           >> $GITHUB_OUTPUT
+          echo "short=${SHA:0:7}"     >> $GITHUB_OUTPUT
+          echo "branch=${BRANCH}"     >> $GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+
+      - name: Post build-started comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.issue.number }} \
+            --body "🔨 Building image for \`${{ steps.pr.outputs.short }}\` — [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push PR image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/tensorrt/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ steps.pr.outputs.short }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+
+      - name: Post build-complete comment
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.issue.number }} \
+            --body "✅ Image pushed: \`ghcr.io/${{ github.repository }}:${{ steps.pr.outputs.short }}\`"
+
+      - name: Post build-failed comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.issue.number }} \
+            --body "❌ Image build failed — [see logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
