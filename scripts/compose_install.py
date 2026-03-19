@@ -771,8 +771,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "compose_file", nargs="?", default="docker-compose.yml",
-        help="Path to docker-compose.yml (default: ./docker-compose.yml)",
+        "compose_file", nargs="?", default=None,
+        help="Path to docker-compose.yml/yaml (default: auto-detected in cwd)",
     )
 
     phases = p.add_argument_group("phase control (all enabled by default)")
@@ -814,9 +814,25 @@ def main() -> None:
     parser = build_parser()
     args   = parser.parse_args()
 
-    compose_file = Path(args.compose_file).resolve()
-    if not compose_file.exists():
-        sys.exit(f"error: compose file not found: {compose_file}")
+    if args.compose_file:
+        compose_file = Path(args.compose_file).resolve()
+        if not compose_file.exists():
+            sys.exit(f"error: compose file not found: {compose_file}")
+    else:
+        # Try both common extensions in preference order.
+        for name in ("docker-compose.yml", "docker-compose.yaml",
+                     "compose.yml", "compose.yaml"):
+            candidate = Path.cwd() / name
+            if candidate.exists():
+                compose_file = candidate
+                break
+        else:
+            sys.exit(
+                "error: no compose file found in current directory.\n"
+                "       Tried: docker-compose.yml, docker-compose.yaml, "
+                "compose.yml, compose.yaml\n"
+                "       Pass the path explicitly: python3 install.py <file>"
+            )
 
     print_banner()
 
