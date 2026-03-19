@@ -6,14 +6,18 @@
 """
 condor installer — wire condor into a Frigate docker-compose setup.
 
-Usage (no repo needed):
-    curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py \\
-        | uv run - [OPTIONS] [COMPOSE_FILE]
+Usage (with uv — preferred, handles dependencies automatically):
+    uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py
 
-Usage (from repo):
-    uv run scripts/compose_install.py [OPTIONS] [COMPOSE_FILE]
+Usage (with plain python3 — self-bootstraps ruamel.yaml via pip):
+    curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py | python3 -
+    python3 scripts/compose_install.py         # from repo
 
-Phases (all enabled by default unless noted):
+Note: 'uv run python scripts/compose_install.py' does NOT work — it runs the
+script inside the project venv (which lacks ruamel.yaml) instead of treating
+it as a standalone PEP-723 script.  Use 'uv run scripts/compose_install.py'.
+
+Phases (all enabled by default):
 
     [1] compose   Add condor service + depends_on to docker-compose.yml
     [2] config    Write starter condor config.yaml into <frigate-config>/condor/
@@ -26,17 +30,76 @@ All file modifications are backed up before editing.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap, CommentedSeq
+# ── YAML backend bootstrap ─────────────────────────────────────────────────────
+# Must run before any YAML imports.  Sets _YAML_BACKEND to "ruamel" or "pyyaml".
+
+_YAML_BACKEND: str = ""
+
+
+def _bootstrap_yaml() -> None:
+    global _YAML_BACKEND
+
+    # 1. Already importable (common when running inside the condor project venv,
+    #    or the user already has it installed).
+    try:
+        import ruamel.yaml  # noqa: F401
+        _YAML_BACKEND = "ruamel"
+        return
+    except ImportError:
+        pass
+
+    # 2. Try to install ruamel.yaml into a temp directory so we don't pollute
+    #    the user's environment.  Requires pip (comes with every CPython).
+    tmp = Path(tempfile.mkdtemp(prefix="condor_deps_"))
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install",
+             "--quiet", "--target", str(tmp), "ruamel.yaml"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sys.path.insert(0, str(tmp))
+        importlib.invalidate_caches()
+        import ruamel.yaml  # noqa: F401
+        _YAML_BACKEND = "ruamel"
+        return
+    except Exception:
+        pass
+
+    # 3. Fall back to PyYAML (stdlib-adjacent; often pre-installed on Debian/Ubuntu).
+    #    This works but strips comments from any YAML files we edit.
+    try:
+        import yaml  # noqa: F401
+        _YAML_BACKEND = "pyyaml"
+        return
+    except ImportError:
+        pass
+
+    # 4. Nothing worked.
+    print(
+        "error: no YAML library available.\n"
+        "  Install ruamel.yaml:  pip install ruamel.yaml\n"
+        "  Or install uv and run: uv run https://raw.githubusercontent.com/"
+        "lansing/condor/master/scripts/compose_install.py",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+_bootstrap_yaml()
+
 
 # ── Visual constants ───────────────────────────────────────────────────────────
 
@@ -49,26 +112,71 @@ _LOGO = """\
  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝"""
 
 _TAGLINE = "Remote TensorRT detector for Frigate"
-_HR = "─" * 56
-_BOLD = "\033[1m"
-_DIM  = "\033[2m"
-_CYAN = "\033[36m"
-_GREEN = "\033[32m"
+_HR     = "─" * 56
+_BOLD   = "\033[1m"
+_DIM    = "\033[2m"
+_CYAN   = "\033[36m"
+_GREEN  = "\033[32m"
 _YELLOW = "\033[33m"
-_RED = "\033[31m"
-_RESET = "\033[0m"
+_RED    = "\033[31m"
+_RESET  = "\033[0m"
 
 # ── Installer constants ────────────────────────────────────────────────────────
 
 CONDOR_IMAGE        = "ghcr.io/lansing/condor:latest"
 CONDOR_SERVICE_NAME = "condor"
 CONDOR_ZMQ_PORT     = 5555
-CONDOR_STATS_DIR    = "/run/condor"          # container-internal
+CONDOR_STATS_DIR    = "/run/condor"
 CONDOR_STATS_SOCKET = "/run/condor/metrics.sock"
 CONDOR_MODELS_DIR   = "/app/models"
 CONDOR_CONFIG_DIR   = "/app/config"
 
 _FRIGATE_IMAGE_RE = re.compile(r"frigate", re.IGNORECASE)
+
+# ── YAML backend abstraction ───────────────────────────────────────────────────
+# All YAML I/O goes through these four functions so that the rest of the script
+# is backend-agnostic.  ruamel preserves comments; PyYAML strips them (warned).
+
+
+def _yaml_load(path: Path) -> tuple[Any, dict]:
+    """Load a YAML file.  Returns (dumper_token, data)."""
+    if _YAML_BACKEND == "ruamel":
+        from ruamel.yaml import YAML
+        y = YAML()
+        y.preserve_quotes = True
+        y.width = 120
+        with path.open() as f:
+            return y, y.load(f)
+    else:
+        import yaml
+        with path.open() as f:
+            return yaml, yaml.safe_load(f)
+
+
+def _yaml_dump(dumper: Any, data: dict, dest: Any) -> None:
+    """Write data to an open file (or stdout) using the active backend."""
+    if _YAML_BACKEND == "ruamel":
+        dumper.dump(data, dest)
+    else:
+        import yaml
+        yaml.dump(data, dest, default_flow_style=False, allow_unicode=True)
+
+
+def _new_map(d: dict | None = None) -> dict:
+    """Return a new ordered mapping, using CommentedMap when available."""
+    if _YAML_BACKEND == "ruamel":
+        from ruamel.yaml.comments import CommentedMap
+        return CommentedMap(d or {})
+    return dict(d or {})
+
+
+def _new_seq(items: list | None = None) -> list:
+    """Return a new sequence, using CommentedSeq when available."""
+    if _YAML_BACKEND == "ruamel":
+        from ruamel.yaml.comments import CommentedSeq
+        return CommentedSeq(items or [])
+    return list(items or [])
+
 
 # ── Data classes ───────────────────────────────────────────────────────────────
 
@@ -89,10 +197,11 @@ class InstallContext:
     frigate_config_file: Path # frigate's config.yaml to patch for detectors
     num_workers: int = 1      # condor workers → number of zmq detector entries
 
-    condor_port: int  = CONDOR_ZMQ_PORT
-    dry_run: bool     = False
-    backup: bool      = True
-    yes: bool         = False  # skip interactive consent
+    condor_port: int = CONDOR_ZMQ_PORT
+    dry_run: bool    = False
+    backup: bool     = True
+    yes: bool        = False
+    force: bool      = False
 
     @property
     def condor_config_host_dir(self) -> str:
@@ -107,25 +216,11 @@ class InstallContext:
         return Path(self.bin_dir) / "condor"
 
 
-# ── YAML helpers ───────────────────────────────────────────────────────────────
-
-
-def _make_yaml() -> YAML:
-    y = YAML()
-    y.preserve_quotes = True
-    y.width = 120
-    return y
-
-
-def _load_yaml(path: Path) -> tuple[YAML, CommentedMap]:
-    y = _make_yaml()
-    with path.open() as f:
-        data = y.load(f)
-    return y, data
+# ── File helpers ───────────────────────────────────────────────────────────────
 
 
 def _backup(path: Path, dry_run: bool) -> Optional[Path]:
-    """Copy path → path.bak. Returns the backup path, or None if path doesn't exist."""
+    """Copy path → path.bak.  Returns the backup path, or None if path doesn't exist."""
     if not path.exists():
         return None
     bak = path.with_suffix(path.suffix + ".bak")
@@ -137,7 +232,7 @@ def _backup(path: Path, dry_run: bool) -> Optional[Path]:
 # ── Discovery ──────────────────────────────────────────────────────────────────
 
 
-def _volume_parts(vol) -> tuple[str, str] | None:
+def _volume_parts(vol: Any) -> tuple[str, str] | None:
     if isinstance(vol, str):
         parts = vol.split(":")
         if len(parts) >= 2:
@@ -149,7 +244,7 @@ def _volume_parts(vol) -> tuple[str, str] | None:
     return None
 
 
-def detect_frigate_service(services: CommentedMap) -> str:
+def detect_frigate_service(services: dict) -> str:
     for name, svc in services.items():
         if svc and isinstance(svc, dict):
             if _FRIGATE_IMAGE_RE.search(str(svc.get("image", ""))):
@@ -160,7 +255,7 @@ def detect_frigate_service(services: CommentedMap) -> str:
     )
 
 
-def detect_models_dir(svc: CommentedMap) -> str:
+def detect_models_dir(svc: dict) -> str:
     for vol in svc.get("volumes", []):
         parts = _volume_parts(vol)
         if not parts:
@@ -174,7 +269,7 @@ def detect_models_dir(svc: CommentedMap) -> str:
     )
 
 
-def detect_config_dir(svc: CommentedMap) -> str:
+def detect_config_dir(svc: dict) -> str:
     for vol in svc.get("volumes", []):
         parts = _volume_parts(vol)
         if not parts:
@@ -186,24 +281,16 @@ def detect_config_dir(svc: CommentedMap) -> str:
 
 
 def detect_frigate_config_file(frigate_config_dir: str, compose_file: Path) -> Path:
-    """Find frigate's config.yaml / config.yml relative to the compose file."""
-    base = compose_file.parent
-    # Resolve the host-side config dir relative to the compose file location.
-    cfg_dir = (base / frigate_config_dir).resolve()
+    cfg_dir = (compose_file.parent / frigate_config_dir).resolve()
     for name in ("config.yaml", "config.yml"):
         candidate = cfg_dir / name
         if candidate.exists():
             return candidate
-    # Return the expected path even if it doesn't exist yet.
     return cfg_dir / "config.yaml"
 
 
 def detect_bin_dir() -> str:
-    """
-    Suggest the best bin directory for the 'condor' launcher.
-    Prefers ~/.local/bin if it already exists (non-invasive, no sudo).
-    Falls back to /usr/local/bin.
-    """
+    """Prefer ~/.local/bin (non-invasive, no sudo); fall back to /usr/local/bin."""
     local_bin = Path.home() / ".local" / "bin"
     if local_bin.exists():
         return str(local_bin)
@@ -214,7 +301,6 @@ def detect_bin_dir() -> str:
 
 
 def _c(code: str, text: str) -> str:
-    """Wrap text in an ANSI colour code (only when stdout is a tty)."""
     if sys.stdout.isatty():
         return f"{code}{text}{_RESET}"
     return text
@@ -224,6 +310,12 @@ def print_banner() -> None:
     print()
     print(_c(_CYAN, _LOGO))
     print()
+    if _YAML_BACKEND == "pyyaml":
+        print(_c(_YELLOW,
+            "  ⚠  ruamel.yaml unavailable — falling back to PyYAML.\n"
+            "     Comments in edited YAML files will be stripped.\n"
+            "     To preserve comments: pip install ruamel.yaml\n"
+        ))
     print(_c(_BOLD, f"  {_TAGLINE}"))
     print(f"  {_HR}")
     print()
@@ -233,17 +325,16 @@ def _bullet(text: str) -> str:
     return f"    {_c(_CYAN, '✦')} {text}"
 
 
-def _path(text: str) -> str:
+def _path(text: Any) -> str:
     return _c(_DIM, str(text))
 
 
 def _prompt(question: str, default: str = "") -> str:
-    """Single-line prompt; returns default if user presses Enter."""
+    """Single-line prompt; returns default on Enter or EOFError (non-interactive)."""
     placeholder = f" [{_c(_BOLD, default)}]" if default else ""
     try:
         answer = input(f"    {question}{placeholder}: ").strip()
     except EOFError:
-        # Non-interactive (e.g. piped input without a tty) — use default.
         print(default)
         return default
     return answer or default
@@ -262,11 +353,11 @@ def _confirm(prompt: str = "Proceed with installation?") -> bool:
 
 def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
     """
-    Load the compose file, run auto-detection, interactively confirm/override
-    each phase's target paths, and return a fully resolved InstallContext.
+    Auto-detect paths from the compose file, show the full plan with prompts
+    for any user-configurable locations, and return a resolved InstallContext.
     """
-    _, data = _load_yaml(compose_file)
-    services: CommentedMap = data.get("services")
+    _, data = _yaml_load(compose_file)
+    services: dict = data.get("services") or {}
     if not services:
         sys.exit("error: no 'services' key found in compose file")
 
@@ -284,10 +375,9 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
 
     config_dir = detect_config_dir(frigate_svc)
 
-    # ── Display plan header ────────────────────────────────────────────────────
+    # ── Plan display ───────────────────────────────────────────────────────────
     condor_config_path = Path(config_dir) / "condor" / "config.yaml"
-    run_dir = compose_file.parent / "run"
-
+    run_dir            = compose_file.parent / "run"
     condor_config_bak  = condor_config_path.with_suffix(
         condor_config_path.suffix + ".bak"
     ) if condor_config_path.exists() else None
@@ -295,7 +385,6 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
 
     print(f"  {_c(_BOLD, 'The following steps will be performed:')}\n")
 
-    # ── Phase 1: compose ───────────────────────────────────────────────────────
     if args.compose:
         print(f"  {_c(_BOLD, '[1] docker-compose.yml')}")
         print(_bullet(f"Add {_c(_CYAN, CONDOR_IMAGE)} service"))
@@ -306,7 +395,6 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
         print(f"      Backup: {_path(compose_bak)}")
         print()
 
-    # ── Phase 2: condor config ─────────────────────────────────────────────────
     if args.config:
         print(f"  {_c(_BOLD, '[2] Condor config')}")
         print(_bullet("Write starter config.yaml with sensible defaults"))
@@ -317,36 +405,38 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
             print(f"      {_c(_DIM, '(new file — no backup needed)')}")
         print()
 
-    # ── Phase 3: TUI launcher ──────────────────────────────────────────────────
-    bin_dir = args.bin_dir  # may be None
+    # Phase 3: bin dir prompt.
+    bin_dir = args.bin_dir
     if args.tui:
         print(f"  {_c(_BOLD, '[3] TUI launcher')}")
         print(_bullet(
             f"Install {_c(_CYAN, 'condor')} command "
             f"— opens condor-tui inside the running container"
         ))
-        default_bin = detect_bin_dir() if not bin_dir else bin_dir
+        default_bin = bin_dir or detect_bin_dir()
         if args.yes or not sys.stdout.isatty():
             bin_dir = default_bin
             print(f"      Install to: {_path(Path(bin_dir) / 'condor')}")
         else:
-            raw = _prompt("      Install to", default_bin)
-            bin_dir = raw
+            bin_dir = _prompt("      Install to", default_bin)
             launcher = Path(bin_dir) / "condor"
-            launcher_bak = launcher.with_name("condor.bak") if launcher.exists() else None
-            print(f"      File:   {_path(launcher)}")
-            if launcher_bak:
-                print(f"      Backup: {_path(launcher_bak)}")
+            if launcher.exists():
+                print(f"      File:   {_path(launcher)}")
+                print(f"      Backup: {_path(launcher.with_name('condor.bak'))}")
+            else:
+                print(f"      File:   {_path(launcher)}")
         print()
 
-    # ── Phase 4: Frigate detector config ───────────────────────────────────────
+    # Phase 4: frigate config file prompt.
     frigate_cfg_file: Optional[Path] = None
     if args.detector:
         frigate_cfg_default = detect_frigate_config_file(config_dir, compose_file)
         print(f"  {_c(_BOLD, '[4] Frigate detector config')}")
-        print(_bullet(f"Add zmq detector entries pointing to condor "
-                      f"(port {args.port}, {args.num_workers} worker"
-                      f"{'s' if args.num_workers > 1 else ''})"))
+        print(_bullet(
+            f"Add zmq detector entries pointing to condor "
+            f"(port {args.port}, {args.num_workers} worker"
+            f"{'s' if args.num_workers > 1 else ''})"
+        ))
         if args.yes or not sys.stdout.isatty():
             frigate_cfg_file = frigate_cfg_default
             print(f"      File:   {_path(frigate_cfg_file)}")
@@ -354,19 +444,10 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
             raw = _prompt("      Edit file", str(frigate_cfg_default))
             frigate_cfg_file = Path(raw)
             if frigate_cfg_file.exists():
-                frigate_cfg_bak = frigate_cfg_file.with_suffix(
-                    frigate_cfg_file.suffix + ".bak"
-                )
-                print(f"      Backup: {_path(frigate_cfg_bak)}")
+                print(f"      Backup: {_path(frigate_cfg_file.with_suffix(frigate_cfg_file.suffix + '.bak'))}")
             else:
                 print(f"      {_c(_YELLOW, '⚠  file not found — will skip if missing at run time')}")
         print()
-
-    # Defaults for disabled phases.
-    if not args.tui:
-        bin_dir = detect_bin_dir()
-    if not args.detector:
-        frigate_cfg_file = detect_frigate_config_file(config_dir, compose_file)
 
     return InstallContext(
         compose_file=compose_file,
@@ -382,36 +463,36 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
         dry_run=args.dry_run,
         backup=args.backup,
         yes=args.yes,
+        force=args.force,
     )
 
 
 # ── Phase 1: docker-compose ────────────────────────────────────────────────────
 
 
-def _build_condor_service(ctx: InstallContext) -> CommentedMap:
+def _build_condor_service(ctx: InstallContext) -> dict:
     compose_dir = ctx.compose_file.parent
-    run_rel = "./" + os.path.relpath(ctx.run_dir, compose_dir).replace("\\", "/")
-    config_rel = ctx.condor_config_host_dir
+    run_rel     = "./" + os.path.relpath(ctx.run_dir, compose_dir).replace("\\", "/")
+    config_rel  = ctx.condor_config_host_dir
     if not config_rel.startswith("."):
         config_rel = "./" + config_rel
 
-    svc: CommentedMap = CommentedMap()
+    svc = _new_map()
     svc["image"]   = CONDOR_IMAGE
     svc["runtime"] = "nvidia"
     svc["restart"] = "unless-stopped"
 
-    vols = CommentedSeq()
-    vols.append(f"{ctx.models_dir}:{CONDOR_MODELS_DIR}")
-    vols.append(f"{config_rel}:{CONDOR_CONFIG_DIR}")
-    vols.append(f"{run_rel}:{CONDOR_STATS_DIR}")
-    svc["volumes"] = vols
+    svc["volumes"] = _new_seq([
+        f"{ctx.models_dir}:{CONDOR_MODELS_DIR}",
+        f"{config_rel}:{CONDOR_CONFIG_DIR}",
+        f"{run_rel}:{CONDOR_STATS_DIR}",
+    ])
+    svc["environment"] = _new_seq([
+        f"CONDOR_STATS_SOCKET={CONDOR_STATS_SOCKET}",
+    ])
 
-    env = CommentedSeq()
-    env.append(f"CONDOR_STATS_SOCKET={CONDOR_STATS_SOCKET}")
-    svc["environment"] = env
-
-    hc: CommentedMap = CommentedMap()
-    hc["test"] = CommentedSeq([
+    hc = _new_map()
+    hc["test"] = _new_seq([
         "CMD-SHELL",
         (
             f"python3 -c 'import socket,sys; s=socket.socket();"
@@ -427,64 +508,55 @@ def _build_condor_service(ctx: InstallContext) -> CommentedMap:
     return svc
 
 
-def _ensure_depends_on(frigate_svc: CommentedMap) -> bool:
-    dep_entry: CommentedMap = CommentedMap()
-    dep_entry["condition"] = "service_healthy"
+def _ensure_depends_on(frigate_svc: dict) -> None:
+    dep_entry         = _new_map({"condition": "service_healthy"})
+    existing          = frigate_svc.get("depends_on")
 
-    existing = frigate_svc.get("depends_on")
     if existing is None:
-        deps: CommentedMap = CommentedMap()
-        deps[CONDOR_SERVICE_NAME] = dep_entry
-        frigate_svc["depends_on"] = deps
-        return True
-    if isinstance(existing, list):
+        frigate_svc["depends_on"] = _new_map({CONDOR_SERVICE_NAME: dep_entry})
+    elif isinstance(existing, list):
         if CONDOR_SERVICE_NAME not in existing:
-            upgraded: CommentedMap = CommentedMap()
-            for name in existing:
-                upgraded[name] = CommentedMap({"condition": "service_started"})
+            upgraded = _new_map({n: _new_map({"condition": "service_started"})
+                                  for n in existing})
             upgraded[CONDOR_SERVICE_NAME] = dep_entry
             frigate_svc["depends_on"] = upgraded
-            return True
     elif isinstance(existing, dict):
         if CONDOR_SERVICE_NAME not in existing:
             existing[CONDOR_SERVICE_NAME] = dep_entry
-            return True
-    return False
 
 
 def install_compose(ctx: InstallContext) -> None:
     print(f"\n  {_c(_BOLD, '[1]')} Updating docker-compose.yml …")
-    yaml, data = _load_yaml(ctx.compose_file)
-    services: CommentedMap = data.get("services", CommentedMap())
+    yaml_obj, data = _yaml_load(ctx.compose_file)
+    services: dict = data.get("services") or {}
 
     if CONDOR_SERVICE_NAME in services:
         print(f"      {_c(_YELLOW, '⚠')}  '{CONDOR_SERVICE_NAME}' service already present — skipping.")
         return
 
-    if ctx.dry_run:
-        print("      DRY RUN — proposed compose output:")
-        print()
-        dummy: CommentedMap = CommentedMap()
-        dummy["services"] = CommentedMap()
-        dummy["services"][CONDOR_SERVICE_NAME] = _build_condor_service(ctx)
-        yaml.dump(dummy, sys.stdout)
-        return
-
-    bak = _backup(ctx.compose_file, ctx.dry_run)
-    if bak:
-        print(f"      {_c(_DIM, f'Backed up → {bak}')}")
-
-    # Prepend condor before frigate.
-    new_services: CommentedMap = CommentedMap()
-    new_services[CONDOR_SERVICE_NAME] = _build_condor_service(ctx)
+    # Prepend condor before all existing services.
+    new_services = _new_map({CONDOR_SERVICE_NAME: _build_condor_service(ctx)})
     for k, v in services.items():
         new_services[k] = v
     data["services"] = new_services
 
     _ensure_depends_on(new_services[ctx.frigate_service_name])
 
+    if ctx.dry_run:
+        print("      DRY RUN — proposed condor service block:")
+        print()
+        dummy = _new_map({"services": _new_map(
+            {CONDOR_SERVICE_NAME: _build_condor_service(ctx)}
+        )})
+        _yaml_dump(yaml_obj, dummy, sys.stdout)
+        return
+
+    bak = _backup(ctx.compose_file, ctx.dry_run)
+    if bak:
+        print(f"      {_c(_DIM, f'Backed up → {bak}')}")
+
     with ctx.compose_file.open("w") as f:
-        yaml.dump(data, f)
+        _yaml_dump(yaml_obj, data, f)
 
     run_dir = Path(ctx.run_dir)
     if not run_dir.exists():
@@ -531,7 +603,7 @@ def install_config(ctx: InstallContext) -> None:
     config_dir  = Path(ctx.condor_config_host_dir)
     config_file = config_dir / "config.yaml"
 
-    if config_file.exists() and not getattr(ctx, "_force", False):
+    if config_file.exists() and not ctx.force:
         print(f"      {_c(_YELLOW, '⚠')}  {config_file} already exists — skipping "
               "(use --force to overwrite).")
         return
@@ -589,12 +661,14 @@ def install_tui(ctx: InstallContext) -> None:
     launcher.chmod(0o755)
     print(f"      {_c(_GREEN, '✓')} Wrote {launcher} (chmod 755)")
 
-    # Warn if the bin dir isn't on PATH.
+    # Warn if the chosen dir isn't on PATH.
     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-    if str(bin_dir.resolve()) not in [str(Path(p).resolve()) for p in path_dirs if p]:
+    resolved  = [str(Path(p).resolve()) for p in path_dirs if p]
+    if str(bin_dir.resolve()) not in resolved:
         print(f"      {_c(_YELLOW, '⚠')}  {bin_dir} is not on your PATH.")
-        print(f"         Add this to your shell profile:")
-        print(f"         {_c(_DIM, f'export PATH=\"{bin_dir}:$PATH\"')}")
+        print(f"         Add to your shell profile:")
+        export_line = f'export PATH="{bin_dir}:$PATH"'
+        print(f"         {_c(_DIM, export_line)}")
 
 
 # ── Phase 4: Frigate detector config ──────────────────────────────────────────
@@ -606,32 +680,29 @@ def install_detector(ctx: InstallContext) -> None:
 
     if not cfg_file.exists():
         print(f"      {_c(_YELLOW, '⚠')}  {cfg_file} not found — skipping.")
-        print(f"         Create it first, then re-run with --no-compose --no-config --no-tui.")
+        print("         Create it first, then re-run with --no-compose --no-config --no-tui.")
         return
 
-    yaml, data = _load_yaml(cfg_file)
+    yaml_obj, data = _yaml_load(cfg_file)
 
-    # Ensure detectors section exists.
     if "detectors" not in data or data["detectors"] is None:
-        data["detectors"] = CommentedMap()
+        data["detectors"] = _new_map()
 
-    detectors: CommentedMap = data["detectors"]
+    detectors: dict = data["detectors"]
 
-    # Build the new detector entries.
-    new_entries: dict[str, CommentedMap] = {}
+    # Build new detector entries (one per worker).
+    new_entries: dict[str, dict] = {}
     for i in range(ctx.num_workers):
-        name = f"condor_{i}" if ctx.num_workers > 1 else "condor"
-        port = ctx.condor_port + i
-        entry: CommentedMap = CommentedMap()
-        entry["type"]     = "zmq"
-        entry["endpoint"] = f"tcp://{CONDOR_SERVICE_NAME}:{port}"
+        name  = f"condor_{i}" if ctx.num_workers > 1 else "condor"
+        port  = ctx.condor_port + i
+        entry = _new_map({"type": "zmq",
+                           "endpoint": f"tcp://{CONDOR_SERVICE_NAME}:{port}"})
         new_entries[name] = entry
 
-    # Check for conflicts.
     conflicts = [k for k in new_entries if k in detectors]
     if conflicts:
         print(f"      {_c(_YELLOW, '⚠')}  Entries already present: {conflicts} — skipping.")
-        print("         Remove them manually and re-run if you want to replace them.")
+        print("         Remove them manually and re-run to replace.")
         return
 
     if ctx.dry_run:
@@ -650,7 +721,7 @@ def install_detector(ctx: InstallContext) -> None:
         detectors[name] = entry
 
     with cfg_file.open("w") as f:
-        yaml.dump(data, f)
+        _yaml_dump(yaml_obj, data, f)
 
     for name in new_entries:
         print(f"      {_c(_GREEN, '✓')} Added detector '{name}'")
@@ -725,7 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
     over.add_argument("--port", type=int, default=CONDOR_ZMQ_PORT, metavar="N",
                       help=f"ZMQ port (default: {CONDOR_ZMQ_PORT})")
     over.add_argument("--num-workers", type=int, default=1, metavar="N",
-                      help="Number of condor workers / zmq detector entries to add (default: 1)")
+                      help="Number of condor workers / zmq detector entries (default: 1)")
 
     p.add_argument("--dry-run", action="store_true",
                    help="Show what would change without writing any files")
@@ -750,15 +821,12 @@ def main() -> None:
     print_banner()
 
     ctx = build_plan(args, compose_file)
-    ctx._force = args.force  # type: ignore[attr-defined]
 
-    # ── Consent ────────────────────────────────────────────────────────────────
     if not args.dry_run and not args.yes:
         if not _confirm():
             print(f"\n  {_c(_YELLOW, 'Aborted.')} No files were changed.\n")
             sys.exit(0)
 
-    # ── Execute phases ─────────────────────────────────────────────────────────
     print()
     phases_run: dict[str, bool] = {}
 
