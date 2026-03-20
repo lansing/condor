@@ -34,8 +34,6 @@ from pathlib import Path
 import aiofiles
 
 from ..backends.base import BaseBackend, ModelInfo
-from ..backends.onnx_backend import OnnxRuntimeBackend
-from ..backends.openvino_backend import OpenVINOBackend
 from ..backends.tensorrt_backend import TensorRTBackend
 from ..telemetry import tel, tracer
 from opentelemetry.trace import StatusCode
@@ -82,23 +80,10 @@ class AsyncModelManager:
     # ------------------------------------------------------------------
 
     def _make_backend(self) -> BaseBackend:
-        """Instantiate the correct backend based on the configured provider."""
-        provider = self.inference_config.get("provider", "onnx").lower()
-        if provider == "tensorrt":
-            return TensorRTBackend()
-        if provider == "openvino":
-            return OpenVINOBackend()
-        if provider == "cpu":
-            # Legacy alias — treated as ONNX Runtime with default EP selection.
-            logger.warning(
-                "provider: 'cpu' is deprecated; use provider: 'onnx' instead."
-            )
-            return OnnxRuntimeBackend()
-        return OnnxRuntimeBackend()
+        return TensorRTBackend()
 
     def _shared_key(self, model_path: str) -> str:
-        provider = self.inference_config.get("provider", "onnx").lower()
-        return f"{provider}:{model_path}"
+        return f"tensorrt:{model_path}"
 
     # ------------------------------------------------------------------
     # Public API
@@ -138,8 +123,7 @@ class AsyncModelManager:
         if self._shared_registry is None:
             return False
 
-        provider = self.inference_config.get("provider", "onnx").lower()
-        prefix = f"{provider}:"
+        prefix = "tensorrt:"
         for key in self._shared_registry.cached_keys():
             if key.startswith(prefix):
                 # key = "tensorrt:/abs/path/to/model.engine"
@@ -167,7 +151,7 @@ class AsyncModelManager:
         if self._backend is not None:
             return True
 
-        _MODEL_SUFFIXES = {".onnx", ".engine", ".trt", ".xml", ".pt"}
+        _MODEL_SUFFIXES = {".engine", ".trt"}
         try:
             candidates = sorted(
                 p.name
@@ -201,11 +185,9 @@ class AsyncModelManager:
         (engine deserialisation, model compilation) are loaded via the registry
         and reused across all workers.
         """
-        provider = self.inference_config.get("provider", "onnx")
-
         with tracer.start_as_current_span("condor.model.load") as load_span:
             load_span.set_attribute("model_name", model_name)
-            load_span.set_attribute("provider", provider)
+            load_span.set_attribute("provider", "tensorrt")
 
             t_lock = time.perf_counter()
             async with self._lock:

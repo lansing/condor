@@ -13,45 +13,18 @@ server:
   base_port: 5555      # workers bind to base_port, base_port+1, ..., base_port+N-1
 
 inference:
-  # Inference backend.
-  # Options:
-  #   "onnx"      — ONNX Runtime (CPU + optional hardware EPs).
-  #                 provider_options:
-  #                   execution_provider: "CPUExecutionProvider"       # default
-  #                   execution_provider: "OpenVINOExecutionProvider"  # needs onnxruntime-openvino
-  #                   execution_provider: "CUDAExecutionProvider"      # needs onnxruntime-gpu
-  #                   device: "GPU"   # EP-specific device (e.g. CPU/GPU/AUTO for OpenVINO EP)
-  #
-  #   "openvino"  — Native OpenVINO runtime (not onnxruntime-openvino).
-  #                 Requires: uv sync --extra openvino  (or condor:openvino image).
-  #                 provider_options:
-  #                   device: "CPU"   # or GPU, AUTO, NPU, etc.  Default: CPU.
-  #
-  #   "tensorrt"  — TensorRT engine (.engine file); requires condor:tensorrt image
-  #                 with --runtime nvidia.  See docs/requirements/TENSORRT.md.
-  #                 provider_options:
-  #                   device: 0       # CUDA device index.  Default: 0.
+  # TensorRT engine (.engine file); requires condor:tensorrt image
+  # with --runtime nvidia.  See docs/requirements/TENSORRT.md.
   provider: "tensorrt"
   #provider_options:
-  #  device: 0
+  #  device: 0     # CUDA device index.  Default: 0.
   # Maximum number of workers that may execute the hardware inference call
-  # (execute_v2 / session.run / request.infer) simultaneously.
+  # (execute_v2) simultaneously.
   # 0 = unlimited (default — suitable when the GPU has enough headroom).
   # 1 = serialise inference calls; workers still pipeline H→D/D→H and
   #     post-processing concurrently, so throughput improves vs. a single worker.
   # N = allow up to N concurrent GPU kernel launches (MIG / powerful GPUs).
   max_inference_concurrency: 1
-
-  # --- ONNX examples ---
-  #provider: "onnx"
-  #provider_options:
-  #  execution_provider: "OpenVINOExecutionProvider"
-  #  device: "GPU"
-
-  # --- Native OpenVINO example ---
-  #provider: "openvino"
-  #provider_options:
-  #  device: "AUTO"
 
 
 post_process:

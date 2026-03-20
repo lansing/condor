@@ -33,51 +33,9 @@ _TRT_LOGO = """\
    ╚═╝   ╚═╝  ╚═╝   ╚═╝
    TensorRT Backend"""
 
-_ONNX_LOGO = """\
- ██████╗ ███╗  ██╗███╗  ██╗██╗  ██╗
-██╔═══██╗████╗ ██║████╗ ██║╚██╗██╔╝
-██║   ██║██╔██╗██║██╔██╗██║ ╚███╔╝
-╚██████╔╝██║╚████║██║╚████║ ██╔██╗
- ╚═════╝ ╚═╝ ╚═══╝╚═╝ ╚═══╝╚═╝ ╚═╝
- ONNX Runtime Backend"""
-
-_OV_LOGO = """\
- ██████╗ ██╗   ██╗
-██╔═══██╗██║   ██║
-██║   ██║██║   ██║
-╚██████╔╝╚██╗ ██╔╝
- ╚═════╝  ╚████╔╝
-OpenVINO™ Runtime"""
-
-_CPU_LOGO = """\
- ██████╗██████╗ ██╗   ██╗
-██╔════╝██╔══██╗██║   ██║
-██║     ██████╔╝██║   ██║
-██║     ██╔═══╝ ██║   ██║
-╚██████╗██║     ╚██████╔╝
-CPU / ONNX Runtime"""
-
-_GENERIC_LOGO = """\
-╔══════════════════════╗
-║  INFERENCE BACKEND   ║
-║                      ║
-║  condor · v0.1.0     ║
-╚══════════════════════╝
-"""
-
-
 def get_provider_logo(provider: str) -> str:
     """Return the 6-line logo string for the given provider name."""
-    p = provider.lower()
-    if p == "tensorrt":
-        return _TRT_LOGO
-    if p == "onnx":
-        return _ONNX_LOGO
-    if p == "openvino":
-        return _OV_LOGO
-    if p in ("cpu", ""):
-        return _CPU_LOGO
-    return _GENERIC_LOGO
+    return _TRT_LOGO
 
 
 # ---------------------------------------------------------------------------

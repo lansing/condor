@@ -1,8 +1,7 @@
 """Process-level registry for shared backend resources.
 
 When multiple workers load the same model, expensive one-time initialisation
-(TRT engine deserialisation, OpenVINO graph compilation) should happen only
-once.  SharedStateRegistry caches the result of each backend's
+(TRT engine deserialisation) should happen only once.  SharedStateRegistry caches the result of each backend's
 ``load_shared_sync()`` call and returns it to every subsequent worker.
 
 Threading model

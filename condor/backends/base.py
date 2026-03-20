@@ -9,21 +9,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-# Map ONNX Runtime tensor type strings to numpy dtype names.
-ONNX_TYPE_TO_NUMPY: dict[str, str] = {
-    "tensor(float)": "float32",
-    "tensor(float16)": "float16",
-    "tensor(double)": "float64",
-    "tensor(uint8)": "uint8",
-    "tensor(int8)": "int8",
-    "tensor(uint16)": "uint16",
-    "tensor(int16)": "int16",
-    "tensor(int32)": "int32",
-    "tensor(int64)": "int64",
-    "tensor(bool)": "bool",
-}
-
-
 def _detect_layout(shape: list) -> str:
     """Infer NCHW vs NHWC from a 4-D tensor shape.
 

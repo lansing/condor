@@ -9,7 +9,6 @@ dependencies = [
     "numpy>=2.0",
     "pydantic>=2.0",
     "pyyaml>=6.0",
-    "onnxruntime>=1.19",
     "opencv-python-headless>=4.10",
     # Observability — API is zero-overhead when no SDK provider is configured.
     "opentelemetry-api>=1.27",
@@ -17,11 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Native OpenVINO backend (provider: "openvino").
-# Install with: uv sync --extra openvino
-openvino = [
-    "openvino>=2024.0",
-]
 # Lightweight local metrics: Prometheus scrape endpoint (no database needed).
 # Install with: uv sync --extra observability-local
 # Then set observability.mode: "prometheus" in config.yaml.
