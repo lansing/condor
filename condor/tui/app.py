@@ -229,7 +229,71 @@ class StatusBar(Static):
 # ---------------------------------------------------------------------------
 
 
-class StackedBarPanel(Static):
+class _LatencyBars(Static):
+    """Renders the title row and stacked bar chart (no summary line)."""
+
+    DEFAULT_CSS = """
+    _LatencyBars { height: 1fr; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("")
+        self._lat_data: list[float] = []
+        self._stages: dict[str, list[float]] = {}
+
+    def update(self, lat_data: list[float], stages: dict[str, list[float]]) -> None:
+        self._lat_data = lat_data
+        self._stages = stages
+        self.refresh()
+
+    def render(self) -> str:  # type: ignore[override]
+        lat = self._lat_data
+        stages = self._stages
+
+        # Widget.size is the content area (Textual excludes border and padding).
+        # bar_h: content_h - title(1)  [summary lives in a sibling Static]
+        # bar_w: content_w — matches _num_ticks = lat_panel.size.width in _update_ui
+        bar_h = max(1, self.size.height - 1)
+        bar_w = max(1, self.size.width)
+
+        peak = max(lat) if lat else 0.0
+        title = f" ▶ E2E LATENCY  [yellow]↑ {peak:.0f}[/yellow]"
+
+        if not lat:
+            return title
+
+        # Align to rightmost n_cols ticks; left-pad to bar_w with baseline markers
+        n_cols = min(bar_w, len(lat))
+        offset = len(lat) - n_cols
+        lat_slice = lat[offset:]
+        n_blank = bar_w - n_cols
+
+        # Grid is always bar_w wide so rendered rows fill the content area exactly
+        grid: list[list[str]] = [[""] * bar_w for _ in range(bar_h)]
+        for col in range(n_blank):
+            grid[bar_h - 1][col] = _BASELINE_COLOR
+        for col_idx in range(n_cols):
+            col = n_blank + col_idx
+            t_idx = offset + col_idx
+            vals: dict[str, float] = {
+                stage: (
+                    stages.get(stage, [])[t_idx]
+                    if t_idx < len(stages.get(stage, []))
+                    else 0.0
+                )
+                for stage in STAGE_ORDER
+            }
+            col_colors = _build_column(vals, bar_h, lat_slice[col_idx], peak)
+            for row in range(bar_h):
+                grid[row][col] = col_colors[row]
+
+        lines = [title]
+        for row in grid:
+            lines.append(_render_bar_row(row))
+        return "\n".join(lines)
+
+
+class StackedBarPanel(Widget):
     """E2E latency sparkline rendered as a stacked pipeline-stage bar chart.
 
     Each vertical bar represents one tick.  Its height segments show the
@@ -249,14 +313,19 @@ class StackedBarPanel(Static):
         background: $background;
         color: $success;
     }
+    StackedBarPanel > .summary {
+        height: 1;
+        color: $text-muted;
+    }
     """
 
     def __init__(self) -> None:
         super().__init__(id="latency-panel")
-        self._lat_data: list[float] = []
-        self._stages: dict[str, list[float]] = {}
         self._n: int = 60
-        self._summary: str = ""
+
+    def compose(self) -> ComposeResult:
+        yield _LatencyBars()
+        yield Static("", classes="summary")
 
     def update_data(
         self,
@@ -265,60 +334,9 @@ class StackedBarPanel(Static):
         n: int,
         summary: str,
     ) -> None:
-        self._lat_data = lat_data
-        self._stages = stages
         self._n = n
-        self._summary = summary
-        self.refresh()
-
-    def render(self) -> str:  # type: ignore[override]
-        lat = self._lat_data
-        stages = self._stages
-
-        # Widget.size is the content area (Textual excludes border and padding).
-        # bar_h: content_h - title(1) - summary(1)
-        # bar_w: content_w directly — matches _num_ticks = lat_panel.size.width in _update_ui
-        bar_h = max(1, self.size.height - 2)
-        bar_w = max(1, self.size.width)
-
-        peak = max(lat) if lat else 0.0
-        title = f" ▶ E2E LATENCY  [dim]↑ {peak:.0f}[/dim]"
-
-        if not lat:
-            return f"{title}\n{self._summary}"
-
-        # Align to rightmost n_cols ticks; left-pad to bar_w with baseline markers
-        n_cols = min(bar_w, len(lat))
-        offset = len(lat) - n_cols
-        lat_slice = lat[offset:]
-        n_blank = bar_w - n_cols
-
-        # Grid is always bar_w wide so rendered rows fill the content area exactly
-        grid: list[list[str]] = [[""] * bar_w for _ in range(bar_h)]
-        # Blank left-padding columns get a baseline marker at the bottom row
-        for col in range(n_blank):
-            grid[bar_h - 1][col] = _BASELINE_COLOR
-        # Real data in rightmost n_cols columns
-        for col_idx in range(n_cols):
-            col = n_blank + col_idx
-            t_idx = offset + col_idx
-            vals: dict[str, float] = {
-                stage: (
-                    stages.get(stage, [])[t_idx]
-                    if t_idx < len(stages.get(stage, []))
-                    else 0.0
-                )
-                for stage in STAGE_ORDER
-            }
-            col_colors = _build_column(vals, bar_h, lat_slice[col_idx], peak)
-            for row in range(bar_h):
-                grid[row][col] = col_colors[row]
-
-        lines = [title]
-        for row in grid:
-            lines.append(_render_bar_row(row))
-        lines.append(f"[dim]{self._summary}[/dim]")
-        return "\n".join(lines)
+        self.query_one(_LatencyBars).update(lat_data, stages)
+        self.query_one(".summary", Static).update(summary)
 
 
 # ---------------------------------------------------------------------------
