@@ -275,9 +275,9 @@ class StackedBarPanel(Static):
         lat = self._lat_data
         stages = self._stages
 
-        # self.size in render() is the CONTENT area (inside border and padding).
+        # Widget.size is the content area (Textual excludes border and padding).
         # bar_h: content_h - title(1) - summary(1)
-        # bar_w: content_w directly — matches _num_ticks = lat_panel.size.width - 4 in _update_ui
+        # bar_w: content_w directly — matches _num_ticks = lat_panel.size.width in _update_ui
         bar_h = max(1, self.size.height - 2)
         bar_w = max(1, self.size.width)
 
@@ -784,8 +784,9 @@ class CondorTUI(App[None]):
         # graph X-axis and metric rolling windows stay in sync.
         try:
             lat_panel = self.query_one("#latency-panel", StackedBarPanel)
-            # Content width = outer_w - border(2) - padding(2)
-            w = lat_panel.size.width - 4
+            # Widget.size in Textual is already the content area (border and
+            # padding excluded), so no adjustment needed.
+            w = lat_panel.size.width
             if w > 0 and w != self._num_ticks:
                 self._num_ticks = w
                 await self._send_time_config()

@@ -199,7 +199,7 @@ class AsyncModelManager:
                 if not model_path.exists():
                     logger.error("Model file not found: %s", model_path)
                     load_span.set_status(StatusCode.ERROR, "model file not found")
-                    tel.count_model_load(model_name=model_name, provider=provider, status="error")
+                    tel.count_model_load(model_name=model_name, provider="tensorrt", status="error")
                     return False
 
                 # Cleanup the existing backend before loading the new model so that
@@ -241,10 +241,10 @@ class AsyncModelManager:
 
                         if cache_hit_before:
                             ss_span.set_attribute("cache_hit", True)
-                            tel.count_cache_hit(provider=provider, model_name=model_name)
+                            tel.count_cache_hit(provider="tensorrt", model_name=model_name)
                         else:
                             ss_span.set_attribute("cache_hit", False)
-                            tel.count_cache_miss(provider=provider, model_name=model_name)
+                            tel.count_cache_miss(provider="tensorrt", model_name=model_name)
 
                     with tracer.start_as_current_span("condor.backend.load"):
                         await backend.load(
@@ -256,13 +256,13 @@ class AsyncModelManager:
                     self._backend = backend
                     self._active_model = model_name
                     logger.info("Model loaded: %s  info=%s", model_name, backend.model_info)
-                    tel.count_model_load(model_name=model_name, provider=provider, status="ok")
+                    tel.count_model_load(model_name=model_name, provider="tensorrt", status="ok")
                     tel.set_active_model(model_name)
                     return True
                 except Exception:
                     logger.exception("Failed to load model %s.", model_name)
                     load_span.set_status(StatusCode.ERROR, "backend load failed")
-                    tel.count_model_load(model_name=model_name, provider=provider, status="error")
+                    tel.count_model_load(model_name=model_name, provider="tensorrt", status="error")
                     self._backend = None
                     self._active_model = None
                     return False
