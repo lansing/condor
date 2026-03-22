@@ -366,11 +366,11 @@ class GraphPanel(Widget):
         height: 1;
         color: $text-muted;
     }
-    Sparkline > .sparkline--min-color {
-        color: $success-darken-3;
+    #throughput-panel-spark > .sparkline--max-color {
+        color: $accent;
     }
-    Sparkline > .sparkline--max-color {
-        color: $success;
+    #throughput-panel-spark > .sparkline--min-color {
+        color: $accent 30%;
     }
     """
 
