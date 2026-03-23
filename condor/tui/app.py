@@ -445,8 +445,7 @@ class WorkerPanel(Static):
         pp = d.get("postprocess_ms", self._ZERO)
 
         lines = [
-            f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f} rps[/yellow]",
-            f"  Inf   [green]{inf:>7,}[/green]",
+            f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f}/s [/yellow] [green]{inf:>7,}[/green]",
             "  [dim]         avg     p90[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",

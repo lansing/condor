@@ -26,13 +26,14 @@ logger = logging.getLogger(__name__)
 # Override with CONDOR_STATS_SOCKET env var, e.g. when running in Docker
 # and the socket directory is bind-mounted to the host.
 SOCKET_PATH = os.environ.get("CONDOR_STATS_SOCKET", "/tmp/condor-metrics.sock")
-_WINDOW_S = 5.0       # rolling window length for per-worker latency stats
-_SPARKLINE_LEN = 60   # sparkline history depth (one point per second)
+_WINDOW_S = 5.0  # rolling window length for per-worker latency stats
+_SPARKLINE_LEN = 60  # sparkline history depth (one point per second)
 
 
 # ---------------------------------------------------------------------------
 # Rolling window
 # ---------------------------------------------------------------------------
+
 
 class _RollingWindow:
     """Thread-safe deque of (monotonic_timestamp, value) pairs."""
@@ -123,18 +124,20 @@ class _RollingWindow:
 # Per-worker stats bucket
 # ---------------------------------------------------------------------------
 
+
 class _WorkerStats:
-    def __init__(self) -> None:
+    def __init__(self, window_s: float = _WINDOW_S) -> None:
         self.requests_total = 0
         self.inference_total = 0
-        self.e2e = _RollingWindow()
-        self.infer = _RollingWindow()
-        self.postprocess = _RollingWindow()
+        self.e2e = _RollingWindow(window_s)
+        self.infer = _RollingWindow(window_s)
+        self.postprocess = _RollingWindow(window_s)
 
 
 # ---------------------------------------------------------------------------
 # Stats collector
 # ---------------------------------------------------------------------------
+
 
 class StatsCollector:
     """Thread-safe accumulator for all Condor runtime metrics."""
@@ -155,6 +158,7 @@ class StatsCollector:
 
         # Per-worker buckets (created on first access)
         self._workers: dict[int, _WorkerStats] = {}
+        self._current_window_s: float = _WINDOW_S  # kept in sync by set_window_config
 
         # Global timing windows (backend-level; no worker_id available)
         self._sem_wait = _RollingWindow()
@@ -171,14 +175,28 @@ class StatsCollector:
             maxlen=_SPARKLINE_LEN
         )
         # Per-pipeline-stage sparklines (parallel to _sparkline_latency)
-        self._sparkline_mcpy:  collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
-        self._sparkline_h2d:   collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
-        self._sparkline_swait: collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
-        self._sparkline_exec:  collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
-        self._sparkline_d2h:   collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
-        self._sparkline_pp:    collections.deque[float] = collections.deque(maxlen=_SPARKLINE_LEN)
+        self._sparkline_mcpy: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
+        self._sparkline_h2d: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
+        self._sparkline_swait: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
+        self._sparkline_exec: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
+        self._sparkline_d2h: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
+        self._sparkline_pp: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
         self._last_sparkline = 0.0
-        self._sparkline_tick_s = 2.0   # seconds between sparkline points; updated by set_window_config
+        self._sparkline_tick_s = (
+            2.0  # seconds between sparkline points; updated by set_window_config
+        )
         self._sparkline_lock = threading.Lock()
 
     # --- helpers -----------------------------------------------------------
@@ -186,7 +204,7 @@ class StatsCollector:
     def _get_worker(self, wid: int) -> _WorkerStats:
         with self._lock:
             if wid not in self._workers:
-                self._workers[wid] = _WorkerStats()
+                self._workers[wid] = _WorkerStats(self._current_window_s)
             return self._workers[wid]
 
     # --- configuration -----------------------------------------------------
@@ -271,12 +289,18 @@ class StatsCollector:
         sparkline_len = max(10, sparkline_len)
 
         with self._lock:
+            self._current_window_s = window_s
             for w in self._workers.values():
                 w.e2e.set_window(window_s)
                 w.infer.set_window(window_s)
                 w.postprocess.set_window(window_s)
-            for rw in (self._sem_wait, self._trt_host_copy, self._trt_h2d,
-                       self._trt_execute, self._trt_d2h):
+            for rw in (
+                self._sem_wait,
+                self._trt_host_copy,
+                self._trt_h2d,
+                self._trt_execute,
+                self._trt_d2h,
+            ):
                 rw.set_window(window_s)
 
         with self._sparkline_lock:
@@ -289,11 +313,19 @@ class StatsCollector:
                 old_tput[-sparkline_len:], maxlen=sparkline_len
             )
             for attr in (
-                "_sparkline_mcpy", "_sparkline_h2d", "_sparkline_swait",
-                "_sparkline_exec", "_sparkline_d2h", "_sparkline_pp",
+                "_sparkline_mcpy",
+                "_sparkline_h2d",
+                "_sparkline_swait",
+                "_sparkline_exec",
+                "_sparkline_d2h",
+                "_sparkline_pp",
             ):
                 old = list(getattr(self, attr))
-                setattr(self, attr, collections.deque(old[-sparkline_len:], maxlen=sparkline_len))
+                setattr(
+                    self,
+                    attr,
+                    collections.deque(old[-sparkline_len:], maxlen=sparkline_len),
+                )
             self._sparkline_tick_s = window_s / sparkline_len
 
     # --- sparkline ---------------------------------------------------------
@@ -389,9 +421,7 @@ class StatsCollector:
         global_e2e = _agg([workers_snap[w]["e2e_ms"] for w in workers_snap])
         global_infer = _agg([workers_snap[w]["infer_ms"] for w in workers_snap])
         global_pp = _agg([workers_snap[w]["postprocess_ms"] for w in workers_snap])
-        global_rps = round(
-            sum(workers_snap[w]["req_per_sec"] for w in workers_snap), 2
-        )
+        global_rps = round(sum(workers_snap[w]["req_per_sec"] for w in workers_snap), 2)
 
         return {
             "config": cfg,
@@ -412,12 +442,12 @@ class StatsCollector:
             "sparkline_latency": list(self._sparkline_latency),
             "sparkline_throughput": list(self._sparkline_throughput),
             "sparkline_stages": {
-                "mcpy":  list(self._sparkline_mcpy),
-                "h2d":   list(self._sparkline_h2d),
+                "mcpy": list(self._sparkline_mcpy),
+                "h2d": list(self._sparkline_h2d),
                 "swait": list(self._sparkline_swait),
-                "exec":  list(self._sparkline_exec),
-                "d2h":   list(self._sparkline_d2h),
-                "pp":    list(self._sparkline_pp),
+                "exec": list(self._sparkline_exec),
+                "d2h": list(self._sparkline_d2h),
+                "pp": list(self._sparkline_pp),
             },
         }
 
@@ -425,6 +455,7 @@ class StatsCollector:
 # ---------------------------------------------------------------------------
 # Socket server
 # ---------------------------------------------------------------------------
+
 
 class StatsServer:
     """Background thread that pushes JSON snapshots over a Unix domain socket.
