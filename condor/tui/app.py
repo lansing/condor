@@ -27,7 +27,7 @@ from textual.widget import Widget
 from textual.widgets import Sparkline, Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
-from .art import CONDOR_LOGO, build_combined_logo, get_bird_frame, get_provider_logo
+from .art import CONDOR_LOGO, build_combined_logo
 
 # Allow override via env var so the host TUI can reach a socket that is
 # bind-mounted from a running Docker container (see docker-compose.yaml).
@@ -66,7 +66,7 @@ STAGE_LABELS: dict[str, str] = {
     "swait": "GPU queue wait",
     "exec": "TRT engine execute",
     "d2h": "Device → Host (D2H)",
-    "pp":   "Post-process",
+    "pp": "Post-process",
 }
 _BLOCK = "█"
 _BASELINE_CHAR = "▁"
@@ -174,7 +174,7 @@ def _fmt_ms_row(d: dict) -> str:
 
 
 class HeaderWidget(Static):
-    """Combined CONDOR logo (left) and provider logo (right) with flying bird animation."""
+    """CONDOR logo (left) + live status text (right)."""
 
     DEFAULT_CSS = """
     HeaderWidget {
@@ -185,51 +185,39 @@ class HeaderWidget(Static):
     }
     """
 
-    provider: reactive[str] = reactive("", layout=False)
-
     def __init__(self) -> None:
         super().__init__()
-        self._bird_x = 5
-        self._bird_y = 1
-        self._bird_x_direction = 1
-        self._bird_y_direction = 1
-        self._animation_tick = 0
+        self._status_lines: list[str] = ["[dim]● CONNECTING…[/dim]", "", "", "", "", ""]
 
-    def on_mount(self) -> None:
-        """Animation disabled temporarily."""
-        pass
+    def update_status(
+        self, uptime: float, workers_active: int, num_workers: int, model: str
+    ) -> None:
+        self._status_lines = [
+            f"    [bold green]● ONLINE[/bold green]  ⏱ [cyan]{_fmt_time(uptime)}[/cyan]",
+            f"    ⚙ [yellow]{workers_active}/{num_workers} workers[/yellow]",
+            f"    📦 [white]{model}[/white]",
+            "",
+            "",
+            "",
+        ]
+        self.refresh()
+
+    def update_disconnected(self) -> None:
+        self._status_lines = [
+            "[bold red]● DISCONNECTED[/bold red]",
+            f"[dim]waiting for condor server…[/dim]",
+            "",
+            "",
+            "",
+            "",
+        ]
+        self.refresh()
 
     def render(self) -> str:
         condor_lines = CONDOR_LOGO.split("\n")
-        provider_lines = get_provider_logo(self.provider).split("\n")
-
         return build_combined_logo(
-            condor_lines,
-            provider_lines,
-            total_width=self.size.width,
+            condor_lines, self._status_lines, total_width=self.size.width
         )
-
-    def watch_provider(self) -> None:
-        """Refresh when provider changes."""
-        self.refresh()
-
-
-# ---------------------------------------------------------------------------
-# Status bar
-# ---------------------------------------------------------------------------
-
-
-class StatusBar(Static):
-    DEFAULT_CSS = """
-    StatusBar {
-        height: 3;
-        border: heavy $primary;
-        color: $primary;
-        content-align: center middle;
-        background: $background;
-        padding: 0 1;
-    }
-    """
 
 
 # ---------------------------------------------------------------------------
@@ -735,7 +723,6 @@ class CondorTUI(App[None]):
 
     def compose(self) -> ComposeResult:
         yield HeaderWidget()
-        yield StatusBar("● CONNECTING…", id="status-bar")
         with Horizontal(id="graphs-row"):
             yield StackedBarPanel()
             yield GraphPanel("THROUGHPUT", "req/s", "throughput-panel")
@@ -817,41 +804,25 @@ class CondorTUI(App[None]):
 
     def _update_disconnected(self) -> None:
         try:
-            self.query_one("#status-bar", StatusBar).update(
-                "[bold red]● DISCONNECTED[/bold red]  "
-                f"[dim]waiting for condor server at {SOCKET_PATH}…[/dim]"
-            )
+            self.query_one(HeaderWidget).update_disconnected()
         except Exception:
             pass
 
     async def _update_ui(self, data: dict) -> None:
         self._snapshot = data
         cfg = data.get("config", {})
-        provider = cfg.get("provider", "")
         num_workers = cfg.get("num_workers", 1)
         base_port = cfg.get("base_port", 5555)
 
-        # Update header provider logo
-        header = self.query_one(HeaderWidget)
-        if header.provider != provider:
-            header.provider = provider
-
-        # Update status bar
+        # Update header status
         uptime = data.get("uptime_s", 0.0)
         workers_active = data.get("active_workers", 0)
         model_raw = data.get("active_model", "")
         model = Path(model_raw).stem if model_raw else "(none)"
-        concurrent = data.get("inference_concurrent", 0)
-        rps = data.get("global_throughput_rps", 0.0)
 
-        status_text = (
-            f"[bold green]● ONLINE[/bold green]  "
-            f"⏱ [cyan]{_fmt_time(uptime)}[/cyan]  "
-            f"⚙ [yellow]{workers_active}/{num_workers} workers[/yellow]  "
-            f"📦 [white]{model}[/white]  "
-            f"[magenta]{provider or '—'}[/magenta]"
+        self.query_one(HeaderWidget).update_status(
+            uptime, workers_active, num_workers, model
         )
-        self.query_one("#status-bar", StatusBar).update(status_text)
 
         # Derive num_ticks from the latency panel's content width so the
         # graph X-axis and metric rolling windows stay in sync.
