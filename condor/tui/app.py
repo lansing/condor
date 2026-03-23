@@ -160,12 +160,8 @@ def _render_bar_row(row: list[str]) -> str:
 
 
 def _fmt_ms_row(d: dict) -> str:
-    """Format a cur_min_max dict as a fixed-width string.
-
-    Columns: current (no label) | min | max
-    All values are zero when the metric has no data.
-    """
-    return f"{d['cur']:6.1f}  {d['min']:6.1f}  {d['max']:6.1f}"
+    """Format an avg_p90 dict as a fixed-width string."""
+    return f"{d['avg']:6.1f}  {d['p90']:6.1f}"
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +428,7 @@ class WorkerPanel(Static):
         self._trt_data = snapshot
         self.refresh()
 
-    _ZERO = {"cur": 0.0, "min": 0.0, "max": 0.0}
+    _ZERO = {"avg": 0.0, "p90": 0.0}
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
@@ -451,7 +447,7 @@ class WorkerPanel(Static):
         lines = [
             f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f} rps[/yellow]",
             f"  Inf   [green]{inf:>7,}[/green]",
-            "  [dim]                 min    max[/dim]",
+            "  [dim]         avg     p90[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
@@ -490,7 +486,7 @@ class GlobalPanel(Static):
         self._data = snapshot
         self.refresh()
 
-    _ZERO = {"cur": 0.0, "min": 0.0, "max": 0.0}
+    _ZERO = {"avg": 0.0, "p90": 0.0}
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
@@ -505,7 +501,7 @@ class GlobalPanel(Static):
 
         lines = [
             f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
-            "  [dim]                 min    max[/dim]",
+            "  [dim]         avg     p90[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",

@@ -97,30 +97,20 @@ class _RollingWindow:
             "max": round(max(vals), 2),
         }
 
-    def cur_min_max(self, tick_s: float) -> dict[str, float]:
-        """Return {cur, min, max} — always a dict, zeros when no data.
-
-        cur: avg of values in the most recent *tick_s* seconds.  Falls back to
-             the full-window average when no events arrived in the tick window
-             (burst / low-rate traffic).  Returns 0.0 only when the full window
-             is empty (genuine 0 rps condition).
-        min/max: extremes over the full rolling window.
-        """
+    def avg_p90(self) -> dict[str, float]:
+        """Return {avg, p90} over the full rolling window. Returns zeros when no data."""
         now = time.monotonic()
-        cutoff_cur = now - tick_s
         with self._lock:
             self._evict(now)
-            all_vals = [v for _, v in self._data]
-            cur_vals = [v for t, v in self._data if t >= cutoff_cur]
-        if not all_vals:
-            return {"cur": 0.0, "min": 0.0, "max": 0.0}
-        source = cur_vals if cur_vals else all_vals
-        cur = round(sum(source) / len(source), 2)
-        return {
-            "cur": cur,
-            "min": round(min(all_vals), 2),
-            "max": round(max(all_vals), 2),
-        }
+            vals = [v for _, v in self._data]
+        if not vals:
+            return {"avg": 0.0, "p90": 0.0}
+        n = len(vals)
+        avg = round(sum(vals) / n, 2)
+        sorted_vals = sorted(vals)
+        p90_idx = min(int(0.9 * n), n - 1)
+        p90 = round(sorted_vals[p90_idx], 2)
+        return {"avg": avg, "p90": p90}
 
     def set_window(self, window_s: float) -> None:
         """Change the rolling window duration. Old data outside the new window
@@ -364,7 +354,6 @@ class StatsCollector:
         self._maybe_update_sparklines()
 
         now = time.monotonic()
-        tick_s = self._sparkline_tick_s
 
         with self._lock:
             workers_snap: dict[str, Any] = {}
@@ -373,9 +362,9 @@ class StatsCollector:
                     "requests_total": w.requests_total,
                     "inference_total": w.inference_total,
                     "req_per_sec": round(w.e2e.rate(), 2),
-                    "e2e_ms": w.e2e.cur_min_max(tick_s),
-                    "infer_ms": w.infer.cur_min_max(tick_s),
-                    "postprocess_ms": w.postprocess.cur_min_max(tick_s),
+                    "e2e_ms": w.e2e.avg_p90(),
+                    "infer_ms": w.infer.avg_p90(),
+                    "postprocess_ms": w.postprocess.avg_p90(),
                 }
             cfg = {
                 "provider": self._provider,
@@ -388,14 +377,13 @@ class StatsCollector:
             uptime = now - self._start
 
         def _agg(stats_list: list[dict]) -> dict[str, float]:
-            """Aggregate cur_min_max dicts across workers; ignore workers with no data."""
-            active = [s for s in stats_list if s["max"] > 0]
+            """Aggregate avg_p90 dicts across workers; ignore workers with no data."""
+            active = [s for s in stats_list if s["p90"] > 0]
             if not active:
-                return {"cur": 0.0, "min": 0.0, "max": 0.0}
+                return {"avg": 0.0, "p90": 0.0}
             return {
-                "cur": round(sum(s["cur"] for s in active) / len(active), 2),
-                "min": round(min(s["min"] for s in active), 2),
-                "max": round(max(s["max"] for s in active), 2),
+                "avg": round(sum(s["avg"] for s in active) / len(active), 2),
+                "p90": round(max(s["p90"] for s in active), 2),
             }
 
         global_e2e = _agg([workers_snap[w]["e2e_ms"] for w in workers_snap])
@@ -414,11 +402,11 @@ class StatsCollector:
             "workers": workers_snap,
             "global_e2e_ms": global_e2e,
             "global_throughput_rps": global_rps,
-            "global_sem_wait_ms": self._sem_wait.cur_min_max(tick_s),
-            "global_trt_host_copy_ms": self._trt_host_copy.cur_min_max(tick_s),
-            "global_trt_h2d_ms": self._trt_h2d.cur_min_max(tick_s),
-            "global_trt_execute_ms": self._trt_execute.cur_min_max(tick_s),
-            "global_trt_d2h_ms": self._trt_d2h.cur_min_max(tick_s),
+            "global_sem_wait_ms": self._sem_wait.avg_p90(),
+            "global_trt_host_copy_ms": self._trt_host_copy.avg_p90(),
+            "global_trt_h2d_ms": self._trt_h2d.avg_p90(),
+            "global_trt_execute_ms": self._trt_execute.avg_p90(),
+            "global_trt_d2h_ms": self._trt_d2h.avg_p90(),
             "global_infer_ms": global_infer,
             "global_postprocess_ms": global_pp,
             "sparkline_latency": list(self._sparkline_latency),
