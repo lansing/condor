@@ -60,6 +60,14 @@ STAGE_COLORS: dict[str, str] = {
 }
 # Pipeline execution order — determines top-to-bottom stack order in the bar.
 STAGE_ORDER: list[str] = ["mcpy", "h2d", "swait", "exec", "d2h", "pp"]
+STAGE_LABELS: dict[str, str] = {
+    "mcpy": "Host memory copy",
+    "h2d": "Host → Device (H2D)",
+    "swait": "GPU queue wait",
+    "exec": "TRT engine execute",
+    "d2h": "Device → Host (D2H)",
+    "pp":   "Post-process",
+}
 _BLOCK = "█"
 _BASELINE_CHAR = "▁"
 _BASELINE_COLOR = "_baseline"  # sentinel — not a real Rich colour
@@ -233,7 +241,7 @@ class _LatencyBars(Static):
     """Renders the title row and stacked bar chart (no summary line)."""
 
     DEFAULT_CSS = """
-    _LatencyBars { height: 1fr; }
+    _LatencyBars { width: 2fr; height: 1fr; }
     """
 
     def __init__(self) -> None:
@@ -313,6 +321,9 @@ class StackedBarPanel(Widget):
         background: $background;
         color: $success;
     }
+    StackedBarPanel > Horizontal {
+        height: 1fr;
+    }
     StackedBarPanel > .summary {
         height: 1;
         color: $text-muted;
@@ -324,7 +335,9 @@ class StackedBarPanel(Widget):
         self._n: int = 60
 
     def compose(self) -> ComposeResult:
-        yield _LatencyBars()
+        with Horizontal():
+            yield _LatencyBars()
+            yield LegendPanel()
         yield Static("", classes="summary")
 
     def update_data(
@@ -518,6 +531,42 @@ class GlobalPanel(Static):
 
 
 # ---------------------------------------------------------------------------
+# Legend modal
+# ---------------------------------------------------------------------------
+
+
+class LegendPanel(Widget):
+    """Color legend for the E2E latency stacked bar chart.
+
+    Occupies the right 1/3 of the latency panel area.  Hidden by default;
+    toggled with  l.
+    """
+
+    DEFAULT_CSS = """
+    LegendPanel {
+        width: 1fr;
+        height: 1fr;
+        border-left: heavy $success;
+        padding: 0 1;
+        background: $background;
+        display: none;
+    }
+    LegendPanel > .lp-title {
+        height: 1;
+        color: $success;
+        text-style: bold;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(" ▶ STAGE LEGEND", classes="lp-title")
+        yield Static("")
+        for stage in STAGE_ORDER:
+            color = STAGE_COLORS[stage]
+            yield Static(f"  [{color}]██[/{color}]  [{color}]{stage.upper()}[/{color}]")
+
+
+# ---------------------------------------------------------------------------
 # Tick selector dialog
 # ---------------------------------------------------------------------------
 
@@ -614,7 +663,8 @@ class AppFooter(Static):
         spt = self.seconds_per_tick
         return (
             f"[bold white]q[/bold white] Quit  "
-            f"[bold white]t[/bold white] Set Tick  "
+            f"[bold white]t[/bold white] Tick  "
+            f"[bold white]l[/bold white] Legend  "
             f"[dim cyan]{spt}s/tick[/dim cyan]"
         )
 
@@ -667,6 +717,7 @@ class CondorTUI(App[None]):
         ("q", "quit", "Quit"),
         ("ctrl+c", "quit", "Quit"),
         ("t", "set_tick", "Set Tick"),
+        ("l", "legend", "Legend"),
     ]
 
     def __init__(self) -> None:
@@ -747,6 +798,10 @@ class CondorTUI(App[None]):
     def action_set_tick(self) -> None:
         # push_screen_wait requires a worker context — delegate immediately.
         self._open_tick_dialog()
+
+    def action_legend(self) -> None:
+        legend = self.query_one(LegendPanel)
+        legend.display = not legend.display
 
     @work
     async def _open_tick_dialog(self) -> None:
