@@ -68,6 +68,14 @@ STAGE_LABELS: dict[str, str] = {
     "d2h": "Device → Host (D2H)",
     "pp": "Post-process",
 }
+STAGE_ABBREV: dict[str, str] = {
+    "mcpy": "MCpy",
+    "h2d": "H2D",
+    "swait": "SWait",
+    "exec": "Exec",
+    "d2h": "D2H",
+    "pp": "PostP",
+}
 _BLOCK = "█"
 _BASELINE_CHAR = "▁"
 _BASELINE_COLOR = "_baseline"  # sentinel — not a real Rich colour
@@ -456,12 +464,12 @@ class WorkerPanel(Static):
             f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f}/s [/yellow] [green]{inf:>7,}[/green]",
             "  [dim]         avg     p99[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
-            f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
-            f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
-            f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
-            f"  Exec  [white]{_fmt_ms_row(infer)}[/white] ms",
-            f"  D2H   [white]{_fmt_ms_row(d2h)}[/white] ms",
-            f"  PostP [white]{_fmt_ms_row(pp)}[/white] ms",
+            f"  [yellow]MCpy[/yellow]  [white]{_fmt_ms_row(mcpy)}[/white] ms",
+            f"  [cyan]H2D[/cyan]   [white]{_fmt_ms_row(h2d)}[/white] ms",
+            f"  [red]SWait[/red] [white]{_fmt_ms_row(sem)}[/white] ms",
+            f"  [blue]Exec[/blue]  [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  [magenta]D2H[/magenta]   [white]{_fmt_ms_row(d2h)}[/white] ms",
+            f"  [green]PostP[/green] [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
         return "\n".join(lines)
 
@@ -510,12 +518,12 @@ class GlobalPanel(Static):
             f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
             "  [dim]         avg     p99[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
-            f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
-            f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
-            f"  SWait [white]{_fmt_ms_row(sem)}[/white] ms",
-            f"  Exec  [white]{_fmt_ms_row(infer)}[/white] ms",
-            f"  D2H   [white]{_fmt_ms_row(d2h)}[/white] ms",
-            f"  PostP [white]{_fmt_ms_row(pp)}[/white] ms",
+            f"  [yellow]MCpy[/yellow]  [white]{_fmt_ms_row(mcpy)}[/white] ms",
+            f"  [cyan]H2D[/cyan]   [white]{_fmt_ms_row(h2d)}[/white] ms",
+            f"  [red]SWait[/red] [white]{_fmt_ms_row(sem)}[/white] ms",
+            f"  [blue]Exec[/blue]  [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  [magenta]D2H[/magenta]   [white]{_fmt_ms_row(d2h)}[/white] ms",
+            f"  [green]PostP[/green] [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
 
         return "\n".join(lines)
@@ -644,7 +652,7 @@ class LegendPanel(Widget):
         yield Static("")
         for stage in STAGE_ORDER:
             color = STAGE_COLORS[stage]
-            yield Static(f"  [{color}]██[/{color}]  [{color}]{stage.upper()}[/{color}]")
+            yield Static(f"  [{color}]██[/{color}]  [{color}]{STAGE_ABBREV[stage]}[/{color}]")
 
 
 # ---------------------------------------------------------------------------
