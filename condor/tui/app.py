@@ -652,7 +652,9 @@ class LegendPanel(Widget):
         yield Static("")
         for stage in STAGE_ORDER:
             color = STAGE_COLORS[stage]
-            yield Static(f"  [{color}]██[/{color}]  [{color}]{STAGE_ABBREV[stage]}[/{color}]")
+            yield Static(
+                f"  [{color}]██[/{color}]  [{color}]{STAGE_ABBREV[stage]}[/{color}]"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +834,7 @@ class CondorTUI(App[None]):
             yield StackedBarPanel()
             yield GraphPanel("THROUGHPUT", "req/s", "throughput-panel")
         with Horizontal(id="workers-row"):
+            yield GlobalPanel()  # always visible on the left
             yield GpuPanel()  # visible by default; workers mounted hidden on first snapshot
         yield AppFooter()
 
@@ -1039,17 +1042,17 @@ class CondorTUI(App[None]):
     async def _create_worker_panels(self, num_workers: int, base_port: int) -> None:
         """Mount worker panels into the workers-row container."""
         container = self.query_one("#workers-row", Horizontal)
-        # Remove old worker/global panels but keep GpuPanel
+        # Remove old worker panels only; GlobalPanel and GpuPanel stay in place.
         for child in list(container.children):
-            if not isinstance(child, GpuPanel):
+            if isinstance(child, WorkerPanel):
                 await child.remove()
 
         workers_visible = self.query_one(AppFooter).workers_visible
+        gpu_panel = self.query_one(GpuPanel)
         for i in range(num_workers):
             wp = WorkerPanel(i, base_port + i)
             wp.display = workers_visible
-            await container.mount(wp)
-        await container.mount(GlobalPanel())  # always visible
+            await container.mount(wp, before=gpu_panel)
 
 
 # ---------------------------------------------------------------------------

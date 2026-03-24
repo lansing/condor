@@ -126,12 +126,18 @@ class _RollingWindow:
 
 
 class GpuPoller:
-    """Background thread that polls NVML for GPU metrics every second.
+    """Background thread that polls NVML for GPU metrics every 200 ms.
+
+    Polls at 5 Hz so sub-second GPU bursts are captured.  Utilisation samples
+    are accumulated between sparkline ticks; ``consume_avg_util()`` drains the
+    buffer and returns the mean, giving a smoothed value per sparkline point.
 
     Initialisation is attempted lazily so the server starts fine even when
     pynvml is not installed or no GPU is present.  Call ``start()`` and check
-    the return value before using ``latest()``.
+    the return value before using ``latest()`` / ``consume_avg_util()``.
     """
+
+    _POLL_INTERVAL = 0.2  # seconds between NVML queries
 
     def __init__(self, device_index: int = 0) -> None:
         self._device_index = device_index
@@ -144,6 +150,7 @@ class GpuPoller:
         self._mem_used_mb = 0.0
         self._mem_total_mb = 0.0
         self._temp_c = 0
+        self._util_samples: list[float] = []  # accumulated since last consume
         self._stop = threading.Event()
 
     def start(self) -> bool:
@@ -183,17 +190,28 @@ class GpuPoller:
                     )
                     with self._lock:
                         self._util_pct = float(util.gpu)
+                        self._util_samples.append(self._util_pct)
                         self._power_w = round(power_mw / 1000.0, 1)
                         self._mem_used_mb = round(mem.used / (1024 * 1024))
                         self._temp_c = temp
                 except Exception:
                     pass
-                self._stop.wait(1.0)
+                self._stop.wait(self._POLL_INTERVAL)
         except Exception:
             pass
 
     def stop(self) -> None:
         self._stop.set()
+
+    def consume_avg_util(self) -> float:
+        """Drain accumulated utilisation samples and return their mean.
+
+        Called once per sparkline tick.  Returns 0.0 if no samples are ready.
+        """
+        with self._lock:
+            samples = self._util_samples
+            self._util_samples = []
+        return sum(samples) / len(samples) if samples else 0.0
 
     def latest(self) -> dict | None:
         """Return a snapshot dict or None if NVML is not available."""
@@ -489,8 +507,8 @@ class StatsCollector:
         self._sparkline_exec.append(_stage_avg(self._trt_execute))
         self._sparkline_d2h.append(_stage_avg(self._trt_d2h))
         self._sparkline_pp.append(pp_val)
-        gpu_latest = self._gpu_poller.latest() if self._gpu_poller is not None else None
-        self._sparkline_gpu_util.append(gpu_latest["util_pct"] if gpu_latest else 0.0)
+        gpu_util = self._gpu_poller.consume_avg_util() if self._gpu_poller is not None else 0.0
+        self._sparkline_gpu_util.append(gpu_util)
 
     # --- snapshot ----------------------------------------------------------
 
