@@ -27,7 +27,7 @@ from textual.widget import Widget
 from textual.widgets import Sparkline, Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
-from .art import CONDOR_LOGO, build_combined_logo
+from .art import _trunc, _vis
 
 # Allow override via env var so the host TUI can reach a socket that is
 # bind-mounted from a running Docker container (see docker-compose.yaml).
@@ -160,60 +160,68 @@ def _render_bar_row(row: list[str]) -> str:
 
 
 def _fmt_ms_row(d: dict) -> str:
-    """Format an avg_p90 dict as a fixed-width string."""
-    return f"{d['avg']:6.1f}  {d['p90']:6.1f}"
+    """Format an avg_p99 dict as a fixed-width string."""
+    return f"{d['avg']:6.1f}  {d['p99']:6.1f}"
 
 
 # ---------------------------------------------------------------------------
-# Header widget
+# Status banner
 # ---------------------------------------------------------------------------
 
 
-class HeaderWidget(Static):
-    """CONDOR logo (left) + live status text (right)."""
+class StatusBanner(Static):
+    """Single-line status bar: connection state, uptime, workers, model."""
 
     DEFAULT_CSS = """
-    HeaderWidget {
-        height: 8;
-        border: heavy $success;
-        color: $success;
+    StatusBanner {
+        height: 3;
+        border: heavy $primary;
+        color: $primary;
+        content-align: left middle;
         background: $background;
+        padding: 0 1;
     }
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self._status_lines: list[str] = ["[dim]● CONNECTING…[/dim]", "", "", "", "", ""]
+        self._uptime = 0.0
+        self._workers_active = 0
+        self._num_workers = 0
+        self._model = ""
+        self._state = "connecting"
 
     def update_status(
         self, uptime: float, workers_active: int, num_workers: int, model: str
     ) -> None:
-        self._status_lines = [
-            f"    [bold green]● ONLINE[/bold green]  ⏱ [cyan]{_fmt_time(uptime)}[/cyan]",
-            f"    ⚙ [yellow]{workers_active}/{num_workers} workers[/yellow]",
-            f"    📦 [white]{model}[/white]",
-            "",
-            "",
-            "",
-        ]
+        self._uptime = uptime
+        self._workers_active = workers_active
+        self._num_workers = num_workers
+        self._model = model
+        self._state = "online"
         self.refresh()
 
     def update_disconnected(self) -> None:
-        self._status_lines = [
-            "[bold red]● DISCONNECTED[/bold red]",
-            f"[dim]waiting for condor server…[/dim]",
-            "",
-            "",
-            "",
-            "",
-        ]
+        self._state = "disconnected"
         self.refresh()
 
     def render(self) -> str:
-        condor_lines = CONDOR_LOGO.split("\n")
-        return build_combined_logo(
-            condor_lines, self._status_lines, total_width=self.size.width
+        if self._state == "connecting":
+            return "[dim]● CONNECTING…[/dim]"
+        if self._state == "disconnected":
+            return (
+                "[bold red]● DISCONNECTED[/bold red]  "
+                f"[dim]waiting for condor server at {SOCKET_PATH}…[/dim]"
+            )
+        prefix = (
+            f"[bold green]● ONLINE[/bold green]  "
+            f"⏱ [cyan]{_fmt_time(self._uptime)}[/cyan]  "
+            f"⚙ [yellow]{self._workers_active}/{self._num_workers} workers[/yellow]  "
+            f"📦 "
         )
+        model_budget = self.size.width - _vis(prefix)
+        model = _trunc(self._model, model_budget)
+        return f"{prefix}[white]{model}[/white]"
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +436,7 @@ class WorkerPanel(Static):
         self._trt_data = snapshot
         self.refresh()
 
-    _ZERO = {"avg": 0.0, "p90": 0.0}
+    _ZERO = {"avg": 0.0, "p99": 0.0}
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
@@ -446,7 +454,7 @@ class WorkerPanel(Static):
 
         lines = [
             f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f}/s [/yellow] [green]{inf:>7,}[/green]",
-            "  [dim]         avg     p90[/dim]",
+            "  [dim]         avg     p99[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
@@ -485,7 +493,7 @@ class GlobalPanel(Static):
         self._data = snapshot
         self.refresh()
 
-    _ZERO = {"avg": 0.0, "p90": 0.0}
+    _ZERO = {"avg": 0.0, "p99": 0.0}
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
@@ -500,7 +508,7 @@ class GlobalPanel(Static):
 
         lines = [
             f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
-            "  [dim]         avg     p90[/dim]",
+            "  [dim]         avg     p99[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
             f"  MCpy  [white]{_fmt_ms_row(mcpy)}[/white] ms",
             f"  H2D   [white]{_fmt_ms_row(h2d)}[/white] ms",
@@ -511,6 +519,96 @@ class GlobalPanel(Static):
         ]
 
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# GPU panel
+# ---------------------------------------------------------------------------
+
+
+class GpuPanel(Widget):
+    """Live GPU utilisation sparkline + power bar, styled like WorkerPanel."""
+
+    DEFAULT_CSS = """
+    GpuPanel {
+        width: 1fr;
+        height: 100%;
+        border: double $warning;
+        padding: 0 1;
+        background: $background;
+        color: $text;
+    }
+    GpuPanel > .gpu-header {
+        height: 1;
+        color: $warning;
+        text-style: bold;
+    }
+    GpuPanel > #gpu-spark {
+        height: 1fr;
+    }
+    GpuPanel > .gpu-summary {
+        height: 1;
+        color: $text-muted;
+    }
+    GpuPanel > .gpu-power {
+        height: 1;
+        color: $text-muted;
+    }
+    #gpu-spark > .sparkline--max-color {
+        color: $warning;
+    }
+    #gpu-spark > .sparkline--min-color {
+        color: $success;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("GPU  —", classes="gpu-header")
+        yield Sparkline([], id="gpu-spark", summary_function=max)
+        yield Static("", classes="gpu-summary")
+        yield Static("", classes="gpu-power")
+
+    def update_data(self, gpu: dict) -> None:
+        name = gpu.get("name", "Unknown")
+        index = gpu.get("index", 0)
+        temp_c = gpu.get("temp_c", 0)
+        util_pct = gpu.get("util_pct", 0.0)
+        power_w = gpu.get("power_w", 0.0)
+        power_limit_w = gpu.get("power_limit_w", 0.0)
+        mem_used_mb = gpu.get("mem_used_mb", 0.0)
+        mem_total_mb = gpu.get("mem_total_mb", 0.0)
+        sparkline_data = gpu.get("sparkline", [])
+
+        self.query_one(".gpu-header", Static).update(
+            f"[bold]GPU {index}[/bold]  [dim]{name}[/dim]  [yellow]{temp_c}°C[/yellow]"
+        )
+        self.query_one("#gpu-spark", Sparkline).data = sparkline_data
+
+        nonzero = [v for v in sparkline_data if v > 0]
+        if nonzero:
+            summary = (
+                f"  now {util_pct:.0f}%  "
+                f"avg {sum(nonzero) / len(nonzero):.0f}%  "
+                f"peak {max(sparkline_data):.0f}%"
+            )
+        else:
+            summary = ""
+        self.query_one(".gpu-summary", Static).update(summary)
+
+        if power_limit_w > 0:
+            pct = min(1.0, power_w / power_limit_w)
+            bar_w = 10
+            filled = round(pct * bar_w)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            color = "red" if pct >= 0.9 else "yellow"
+            mem_gb = f"{mem_used_mb / 1024:.1f}/{mem_total_mb / 1024:.1f}GB"
+            pwr_text = (
+                f"  Pwr [{color}]{power_w:.0f}W[/{color}]/{power_limit_w:.0f}W "
+                f"[{color}]{bar}[/{color}]  Mem {mem_gb}"
+            )
+        else:
+            pwr_text = f"  Pwr {power_w:.0f}W"
+        self.query_one(".gpu-power", Static).update(pwr_text)
 
 
 # ---------------------------------------------------------------------------
@@ -641,13 +739,16 @@ class AppFooter(Static):
     """
 
     seconds_per_tick: reactive[int] = reactive(2)
+    workers_visible: reactive[bool] = reactive(False)
 
     def render(self) -> str:
         spt = self.seconds_per_tick
+        w_label = "GPU" if self.workers_visible else "Workers"
         return (
             f"[bold white]q[/bold white] Quit  "
             f"[bold white]t[/bold white] Tick  "
             f"[bold white]l[/bold white] Legend  "
+            f"[bold white]w[/bold white] {w_label}  "
             f"[dim cyan]{spt}s/tick[/dim cyan]"
         )
 
@@ -686,7 +787,7 @@ class CondorTUI(App[None]):
     }
 
     #workers-row {
-        height: 1fr;
+        height: 11;
         layout: horizontal;
     }
 
@@ -701,6 +802,7 @@ class CondorTUI(App[None]):
         ("ctrl+c", "quit", "Quit"),
         ("t", "set_tick", "Set Tick"),
         ("l", "legend", "Legend"),
+        ("w", "workers", "Workers"),
     ]
 
     def __init__(self) -> None:
@@ -717,12 +819,12 @@ class CondorTUI(App[None]):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield HeaderWidget()
+        yield StatusBanner()
         with Horizontal(id="graphs-row"):
             yield StackedBarPanel()
             yield GraphPanel("THROUGHPUT", "req/s", "throughput-panel")
         with Horizontal(id="workers-row"):
-            pass  # Worker panels mounted dynamically on first snapshot
+            yield GpuPanel()  # visible by default; workers mounted hidden on first snapshot
         yield AppFooter()
 
     # ------------------------------------------------------------------
@@ -785,6 +887,14 @@ class CondorTUI(App[None]):
         legend = self.query_one(LegendPanel)
         legend.display = not legend.display
 
+    def action_workers(self) -> None:
+        gpu_panel = self.query_one(GpuPanel)
+        show_workers = gpu_panel.display  # if GPU is visible, switch to workers
+        gpu_panel.display = not show_workers
+        for wp in self.query(WorkerPanel):
+            wp.display = show_workers
+        self.query_one(AppFooter).workers_visible = show_workers
+
     @work
     async def _open_tick_dialog(self) -> None:
         result = await self.push_screen_wait(TickSelectorScreen(self._seconds_per_tick))
@@ -799,7 +909,7 @@ class CondorTUI(App[None]):
 
     def _update_disconnected(self) -> None:
         try:
-            self.query_one(HeaderWidget).update_disconnected()
+            self.query_one(StatusBanner).update_disconnected()
         except Exception:
             pass
 
@@ -815,7 +925,7 @@ class CondorTUI(App[None]):
         model_raw = data.get("active_model", "")
         model = Path(model_raw).stem if model_raw else "(none)"
 
-        self.query_one(HeaderWidget).update_status(
+        self.query_one(StatusBanner).update_status(
             uptime, workers_active, num_workers, model
         )
 
@@ -905,15 +1015,33 @@ class CondorTUI(App[None]):
         except Exception:
             pass
 
+        # Update GPU panel
+        gpu_data = data.get("gpu")
+        if gpu_data:
+            spark = list(gpu_data.get("sparkline", []))
+            if len(spark) > n:
+                spark = spark[-n:]
+            elif len(spark) < n:
+                spark = [0.0] * (n - len(spark)) + spark
+            try:
+                self.query_one(GpuPanel).update_data({**gpu_data, "sparkline": spark})
+            except Exception:
+                pass
+
     async def _create_worker_panels(self, num_workers: int, base_port: int) -> None:
         """Mount worker panels into the workers-row container."""
         container = self.query_one("#workers-row", Horizontal)
+        # Remove old worker/global panels but keep GpuPanel
         for child in list(container.children):
-            await child.remove()
+            if not isinstance(child, GpuPanel):
+                await child.remove()
 
+        workers_visible = self.query_one(AppFooter).workers_visible
         for i in range(num_workers):
-            await container.mount(WorkerPanel(i, base_port + i))
-        await container.mount(GlobalPanel())
+            wp = WorkerPanel(i, base_port + i)
+            wp.display = workers_visible
+            await container.mount(wp)
+        await container.mount(GlobalPanel())  # always visible
 
 
 # ---------------------------------------------------------------------------

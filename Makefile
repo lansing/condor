@@ -60,7 +60,7 @@ tui-docker:
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 
-IMAGE_TENSORRT       ?= condor:tensorrt
+IMAGE_TENSORRT       ?= condor
 IMAGE_TENSORRT_BUILD ?= condor:tensorrt-build
 
 # Override models/config mount paths:
@@ -85,33 +85,33 @@ port_flags = $(foreach i,$(shell seq 0 $(shell expr $(1) - 1)),-p $(shell expr $
 # builder-resource files (~1.82 GB) and unneeded CUDA math libs are excluded.
 # trtexec is included for smoke-testing (see Dockerfile to remove it later).
 
-docker-build-tensorrt:
+docker-build:
 	docker build \
 	  -f docker/tensorrt/Dockerfile \
 	  -t $(IMAGE_TENSORRT) \
 	  .
 
 # Force a clean rebuild — skips layer cache.
-docker-rebuild-tensorrt:
+docker-rebuild:
 	docker build \
 	  --no-cache \
 	  -f docker/tensorrt/Dockerfile \
 	  -t $(IMAGE_TENSORRT) \
 	  .
 
-docker-run-tensorrt:
+docker-run:
 	docker run --rm -it --runtime nvidia \
 	  $(call port_flags,$(NUM_WORKERS),$(BASE_PORT)) \
 	  -v $(MODELS_DIR):/app/models \
 	  -v $(CONFIG_DIR):/app/config \
 	  $(IMAGE_TENSORRT)
 
-docker-shell-tensorrt:
+docker-shell:
 	docker run --rm -it --runtime nvidia \
 	  --entrypoint bash \
 	  $(IMAGE_TENSORRT)
 
-docker-test-tensorrt:
+docker-test:
 	docker run --rm --runtime nvidia \
 	  --entrypoint python \
 	  $(IMAGE_TENSORRT) \

@@ -33,6 +33,7 @@ observability-otlp = [
 # Install with: uv sync --extra tui
 tui = [
     "textual>=0.70.0",
+    "nvidia-ml-py>=12.0",
 ]
 dev = [
     "pytest>=8.0",

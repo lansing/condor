@@ -216,6 +216,8 @@ def main() -> None:
         num_workers=config.server.num_workers,
         base_port=config.server.base_port,
     )
+    gpu_device = int(config.inference.provider_options.get("device", 0))
+    tel.stats.configure_gpu(gpu_device)
     stats_server = StatsServer(tel.stats)
     stats_server.start()
 

@@ -98,26 +98,118 @@ class _RollingWindow:
             "max": round(max(vals), 2),
         }
 
-    def avg_p90(self) -> dict[str, float]:
-        """Return {avg, p90} over the full rolling window. Returns zeros when no data."""
+    def avg_p99(self) -> dict[str, float]:
+        """Return {avg, p99} over the full rolling window. Returns zeros when no data."""
         now = time.monotonic()
         with self._lock:
             self._evict(now)
             vals = [v for _, v in self._data]
         if not vals:
-            return {"avg": 0.0, "p90": 0.0}
+            return {"avg": 0.0, "p99": 0.0}
         n = len(vals)
         avg = round(sum(vals) / n, 2)
         sorted_vals = sorted(vals)
-        p90_idx = min(int(0.9 * n), n - 1)
-        p90 = round(sorted_vals[p90_idx], 2)
-        return {"avg": avg, "p90": p90}
+        p99_idx = min(int(0.99 * n), n - 1)
+        p99 = round(sorted_vals[p99_idx], 2)
+        return {"avg": avg, "p99": p99}
 
     def set_window(self, window_s: float) -> None:
         """Change the rolling window duration. Old data outside the new window
         will be evicted on the next stats() / rate() call."""
         with self._lock:
             self._window_s = window_s
+
+
+# ---------------------------------------------------------------------------
+# GPU poller (pynvml — optional; silently disabled if unavailable)
+# ---------------------------------------------------------------------------
+
+
+class GpuPoller:
+    """Background thread that polls NVML for GPU metrics every second.
+
+    Initialisation is attempted lazily so the server starts fine even when
+    pynvml is not installed or no GPU is present.  Call ``start()`` and check
+    the return value before using ``latest()``.
+    """
+
+    def __init__(self, device_index: int = 0) -> None:
+        self._device_index = device_index
+        self._lock = threading.Lock()
+        self._available = False
+        self._name = ""
+        self._util_pct = 0.0
+        self._power_w = 0.0
+        self._power_limit_w = 0.0
+        self._mem_used_mb = 0.0
+        self._mem_total_mb = 0.0
+        self._temp_c = 0
+        self._stop = threading.Event()
+
+    def start(self) -> bool:
+        """Initialise NVML and start the polling thread.  Returns True on success."""
+        try:
+            import pynvml  # type: ignore[import-untyped]
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self._device_index)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode()
+            limit_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            with self._lock:
+                self._available = True
+                self._name = name
+                self._power_limit_w = round(limit_mw / 1000.0, 1)
+                self._mem_total_mb = round(mem.total / (1024 * 1024))
+        except Exception:
+            return False
+        threading.Thread(
+            target=self._poll_loop, name="condor-gpu-poller", daemon=True
+        ).start()
+        return True
+
+    def _poll_loop(self) -> None:
+        try:
+            import pynvml  # type: ignore[import-untyped]
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self._device_index)
+            while not self._stop.is_set():
+                try:
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    temp = pynvml.nvmlDeviceGetTemperature(
+                        handle, pynvml.NVML_TEMPERATURE_GPU
+                    )
+                    with self._lock:
+                        self._util_pct = float(util.gpu)
+                        self._power_w = round(power_mw / 1000.0, 1)
+                        self._mem_used_mb = round(mem.used / (1024 * 1024))
+                        self._temp_c = temp
+                except Exception:
+                    pass
+                self._stop.wait(1.0)
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def latest(self) -> dict | None:
+        """Return a snapshot dict or None if NVML is not available."""
+        with self._lock:
+            if not self._available:
+                return None
+            return {
+                "name": self._name,
+                "index": self._device_index,
+                "util_pct": self._util_pct,
+                "power_w": self._power_w,
+                "power_limit_w": self._power_limit_w,
+                "mem_used_mb": self._mem_used_mb,
+                "mem_total_mb": self._mem_total_mb,
+                "temp_c": self._temp_c,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +251,12 @@ class StatsCollector:
         # Per-worker buckets (created on first access)
         self._workers: dict[int, _WorkerStats] = {}
         self._current_window_s: float = _WINDOW_S  # kept in sync by set_window_config
+
+        # GPU poller (optional; None when pynvml unavailable or not yet configured)
+        self._gpu_poller: GpuPoller | None = None
+        self._sparkline_gpu_util: collections.deque[float] = collections.deque(
+            maxlen=_SPARKLINE_LEN
+        )
 
         # Global timing windows (backend-level; no worker_id available)
         self._sem_wait = _RollingWindow()
@@ -214,6 +312,18 @@ class StatsCollector:
             self._provider = provider
             self._num_workers = num_workers
             self._base_port = base_port
+
+    def configure_gpu(self, device_index: int = 0) -> None:
+        """Start GPU polling for *device_index*.  No-op if pynvml is unavailable."""
+        poller = GpuPoller(device_index)
+        if poller.start():
+            with self._lock:
+                self._gpu_poller = poller
+            gpu = poller.latest()
+            name = gpu["name"] if gpu else "?"
+            logger.info("GPU poller started: device %d (%s)", device_index, name)
+        else:
+            logger.info("GPU metrics unavailable (pynvml not installed or no GPU found)")
 
     def set_active_model(self, model: str) -> None:
         with self._lock:
@@ -319,6 +429,7 @@ class StatsCollector:
                 "_sparkline_exec",
                 "_sparkline_d2h",
                 "_sparkline_pp",
+                "_sparkline_gpu_util",
             ):
                 old = list(getattr(self, attr))
                 setattr(
@@ -378,6 +489,8 @@ class StatsCollector:
         self._sparkline_exec.append(_stage_avg(self._trt_execute))
         self._sparkline_d2h.append(_stage_avg(self._trt_d2h))
         self._sparkline_pp.append(pp_val)
+        gpu_latest = self._gpu_poller.latest() if self._gpu_poller is not None else None
+        self._sparkline_gpu_util.append(gpu_latest["util_pct"] if gpu_latest else 0.0)
 
     # --- snapshot ----------------------------------------------------------
 
@@ -394,9 +507,9 @@ class StatsCollector:
                     "requests_total": w.requests_total,
                     "inference_total": w.inference_total,
                     "req_per_sec": round(w.e2e.rate(), 2),
-                    "e2e_ms": w.e2e.avg_p90(),
-                    "infer_ms": w.infer.avg_p90(),
-                    "postprocess_ms": w.postprocess.avg_p90(),
+                    "e2e_ms": w.e2e.avg_p99(),
+                    "infer_ms": w.infer.avg_p99(),
+                    "postprocess_ms": w.postprocess.avg_p99(),
                 }
             cfg = {
                 "provider": self._provider,
@@ -409,13 +522,13 @@ class StatsCollector:
             uptime = now - self._start
 
         def _agg(stats_list: list[dict]) -> dict[str, float]:
-            """Aggregate avg_p90 dicts across workers; ignore workers with no data."""
-            active = [s for s in stats_list if s["p90"] > 0]
+            """Aggregate avg_p99 dicts across workers; ignore workers with no data."""
+            active = [s for s in stats_list if s["p99"] > 0]
             if not active:
-                return {"avg": 0.0, "p90": 0.0}
+                return {"avg": 0.0, "p99": 0.0}
             return {
                 "avg": round(sum(s["avg"] for s in active) / len(active), 2),
-                "p90": round(max(s["p90"] for s in active), 2),
+                "p99": round(max(s["p99"] for s in active), 2),
             }
 
         global_e2e = _agg([workers_snap[w]["e2e_ms"] for w in workers_snap])
@@ -432,11 +545,11 @@ class StatsCollector:
             "workers": workers_snap,
             "global_e2e_ms": global_e2e,
             "global_throughput_rps": global_rps,
-            "global_sem_wait_ms": self._sem_wait.avg_p90(),
-            "global_trt_host_copy_ms": self._trt_host_copy.avg_p90(),
-            "global_trt_h2d_ms": self._trt_h2d.avg_p90(),
-            "global_trt_execute_ms": self._trt_execute.avg_p90(),
-            "global_trt_d2h_ms": self._trt_d2h.avg_p90(),
+            "global_sem_wait_ms": self._sem_wait.avg_p99(),
+            "global_trt_host_copy_ms": self._trt_host_copy.avg_p99(),
+            "global_trt_h2d_ms": self._trt_h2d.avg_p99(),
+            "global_trt_execute_ms": self._trt_execute.avg_p99(),
+            "global_trt_d2h_ms": self._trt_d2h.avg_p99(),
             "global_infer_ms": global_infer,
             "global_postprocess_ms": global_pp,
             "sparkline_latency": list(self._sparkline_latency),
@@ -449,6 +562,11 @@ class StatsCollector:
                 "d2h": list(self._sparkline_d2h),
                 "pp": list(self._sparkline_pp),
             },
+            "gpu": (
+                {**self._gpu_poller.latest(), "sparkline": list(self._sparkline_gpu_util)}
+                if self._gpu_poller is not None and self._gpu_poller.latest() is not None
+                else None
+            ),
         }
 
 
