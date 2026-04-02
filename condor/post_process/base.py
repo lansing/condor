@@ -14,6 +14,8 @@ class BasePostProcessor(ABC):
     (e.g. ``asyncio.to_thread``) so the event loop stays responsive.
     """
 
+    short_name: str = "?"
+
     @abstractmethod
     async def process(
         self,

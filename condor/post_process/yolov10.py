@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 class YoloV10PostProcessor(BasePostProcessor):
     """Post-processor for YOLOv10 ONNX models with ``(1, N, 6)`` output."""
 
+    short_name = "V10"
+
     def __init__(
         self,
         confidence_threshold: float = 0.4,

@@ -197,6 +197,9 @@ class _Tel:
     def set_active_model(self, model_name: str) -> None:
         self.stats.set_active_model(model_name)
 
+    def set_active_postprocessor(self, postprocessor: str) -> None:
+        self.stats.set_active_postprocessor(postprocessor)
+
     def count_request(self, *, worker_id: int, request_type: str, status: str) -> None:
         self.stats.count_request(worker_id)
         if self._req_ctr is not None:

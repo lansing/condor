@@ -157,6 +157,7 @@ class GpuPoller:
         """Initialise NVML and start the polling thread.  Returns True on success."""
         try:
             import pynvml  # type: ignore[import-untyped]
+
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(self._device_index)
             name = pynvml.nvmlDeviceGetName(handle)
@@ -179,6 +180,7 @@ class GpuPoller:
     def _poll_loop(self) -> None:
         try:
             import pynvml  # type: ignore[import-untyped]
+
             handle = pynvml.nvmlDeviceGetHandleByIndex(self._device_index)
             while not self._stop.is_set():
                 try:
@@ -260,6 +262,7 @@ class StatsCollector:
         self._workers_active = 0
         self._inference_concurrent = 0
         self._active_model = ""
+        self._active_postprocessor = ""
 
         # Config metadata (set once from main)
         self._provider = ""
@@ -341,11 +344,17 @@ class StatsCollector:
             name = gpu["name"] if gpu else "?"
             logger.info("GPU poller started: device %d (%s)", device_index, name)
         else:
-            logger.info("GPU metrics unavailable (pynvml not installed or no GPU found)")
+            logger.info(
+                "GPU metrics unavailable (pynvml not installed or no GPU found)"
+            )
 
     def set_active_model(self, model: str) -> None:
         with self._lock:
             self._active_model = model
+
+    def set_active_postprocessor(self, postprocessor: str) -> None:
+        with self._lock:
+            self._active_postprocessor = postprocessor
 
     # --- gauge updates -----------------------------------------------------
 
@@ -507,7 +516,9 @@ class StatsCollector:
         self._sparkline_exec.append(_stage_avg(self._trt_execute))
         self._sparkline_d2h.append(_stage_avg(self._trt_d2h))
         self._sparkline_pp.append(pp_val)
-        gpu_util = self._gpu_poller.consume_avg_util() if self._gpu_poller is not None else 0.0
+        gpu_util = (
+            self._gpu_poller.consume_avg_util() if self._gpu_poller is not None else 0.0
+        )
         self._sparkline_gpu_util.append(gpu_util)
 
     # --- snapshot ----------------------------------------------------------
@@ -535,6 +546,7 @@ class StatsCollector:
                 "base_port": self._base_port,
             }
             active_model = self._active_model
+            active_postprocessor = self._active_postprocessor
             workers_active = self._workers_active
             inference_concurrent = self._inference_concurrent
             uptime = now - self._start
@@ -560,6 +572,7 @@ class StatsCollector:
             "active_workers": workers_active,
             "inference_concurrent": inference_concurrent,
             "active_model": active_model,
+            "active_postprocessor": active_postprocessor,
             "workers": workers_snap,
             "global_e2e_ms": global_e2e,
             "global_throughput_rps": global_rps,
@@ -581,8 +594,12 @@ class StatsCollector:
                 "pp": list(self._sparkline_pp),
             },
             "gpu": (
-                {**self._gpu_poller.latest(), "sparkline": list(self._sparkline_gpu_util)}
-                if self._gpu_poller is not None and self._gpu_poller.latest() is not None
+                {
+                    **self._gpu_poller.latest(),
+                    "sparkline": list(self._sparkline_gpu_util),
+                }
+                if self._gpu_poller is not None
+                and self._gpu_poller.latest() is not None
                 else None
             ),
         }

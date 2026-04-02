@@ -197,15 +197,22 @@ class StatusBanner(Static):
         self._workers_active = 0
         self._num_workers = 0
         self._model = ""
+        self._postprocessor = ""
         self._state = "connecting"
 
     def update_status(
-        self, uptime: float, workers_active: int, num_workers: int, model: str
+        self,
+        uptime: float,
+        workers_active: int,
+        num_workers: int,
+        model: str,
+        postprocessor: str = "",
     ) -> None:
         self._uptime = uptime
         self._workers_active = workers_active
         self._num_workers = num_workers
         self._model = model
+        self._postprocessor = postprocessor
         self._state = "online"
         self.refresh()
 
@@ -229,6 +236,8 @@ class StatusBanner(Static):
         )
         model_budget = self.size.width - _vis(prefix)
         model = _trunc(self._model, model_budget)
+        if self._postprocessor:
+            return f"{prefix}[white]{model}[/white] [[magenta]{self._postprocessor}[/magenta]]"
         return f"{prefix}[white]{model}[/white]"
 
 
@@ -937,7 +946,11 @@ class CondorTUI(App[None]):
         model = Path(model_raw).stem if model_raw else "(none)"
 
         self.query_one(StatusBanner).update_status(
-            uptime, workers_active, num_workers, model
+            uptime,
+            workers_active,
+            num_workers,
+            model,
+            data.get("active_postprocessor", ""),
         )
 
         # Derive num_ticks from the latency panel's content width so the

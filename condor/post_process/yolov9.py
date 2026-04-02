@@ -50,6 +50,8 @@ def xywh2xyxy_np(x: np.ndarray) -> np.ndarray:
 class YoloV9PostProcessor(BasePostProcessor):
     """Post-processor for YOLOv9 ONNX models with yolo-generic output."""
 
+    short_name = "V9"
+
     def __init__(
         self,
         confidence_threshold: float = 0.4,
@@ -87,10 +89,7 @@ class YoloV9PostProcessor(BasePostProcessor):
 
         if raw.ndim == 3:
             if raw.shape[0] == 1:
-                raw = raw[0]
-                num_attrs, num_preds = raw.shape
-                if num_attrs < num_preds:
-                    raw = raw.transpose(1, 0)
+                raw = raw[0].transpose(1, 0)
             else:
                 logger.error(
                     "YoloV9PostProcessor: unexpected batch size %s; expected (1, ..., ...).",
@@ -98,8 +97,9 @@ class YoloV9PostProcessor(BasePostProcessor):
                 )
                 return result
 
-        if raw.ndim == 2:
-            pass
+        elif raw.ndim == 2:
+            if raw.shape[0] < raw.shape[1]:
+                raw = raw.transpose(1, 0)
 
         if raw.ndim != 2 or raw.shape[1] < 5:
             logger.error(

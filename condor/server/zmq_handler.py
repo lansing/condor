@@ -76,6 +76,7 @@ class AsyncZMQHandler:
             confidence_threshold=config.post_process.confidence_threshold,
             max_detections=config.post_process.max_detections,
         )
+        self._last_postprocessor_short: str = self.post_processor.short_name
 
         self._ctx = zmq.asyncio.Context()
         self._socket: zmq.asyncio.Socket = self._ctx.socket(zmq.REP)  # type: ignore[attr-defined]
@@ -162,8 +163,12 @@ class AsyncZMQHandler:
                 raise
 
         elapsed_ms = (time.perf_counter() - t_start) * 1000
-        tel.count_request(worker_id=self._worker_id, request_type=request_type, status="ok")
-        tel.record_request_duration(elapsed_ms, worker_id=self._worker_id, request_type=request_type)
+        tel.count_request(
+            worker_id=self._worker_id, request_type=request_type, status="ok"
+        )
+        tel.record_request_duration(
+            elapsed_ms, worker_id=self._worker_id, request_type=request_type
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -257,7 +262,9 @@ class AsyncZMQHandler:
                         request_dtype,
                         expected_dtype,
                     )
-                    tel.count_dtype_mismatch(expected=expected_dtype, received=request_dtype)
+                    tel.count_dtype_mismatch(
+                        expected=expected_dtype, received=request_dtype
+                    )
                     return _zeros_response()
                 dv_span.set_attribute("mismatch", False)
 
@@ -267,7 +274,9 @@ class AsyncZMQHandler:
                     shape = tuple(int(d) for d in header["shape"])
                     tr_span.set_attribute("input_bytes", len(tensor_bytes))
                     tr_span.set_attribute("input_shape", str(shape))
-                    tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(shape)
+                    tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(
+                        shape
+                    )
                 except Exception:
                     logger.exception(
                         "Failed to reconstruct input tensor from header %s.", header
@@ -282,26 +291,34 @@ class AsyncZMQHandler:
             except Exception:
                 logger.exception("Inference failed.")
                 tel.count_inference(
-                    worker_id=self._worker_id, model_name=model_name,
-                    provider=provider, status="error",
+                    worker_id=self._worker_id,
+                    model_name=model_name,
+                    provider=provider,
+                    status="error",
                 )
                 return _zeros_response()
 
             infer_duration_ms = (time.perf_counter() - t_infer) * 1000
             tel.record_inference_duration(
-                infer_duration_ms, provider=provider, model_name=model_name,
+                infer_duration_ms,
+                provider=provider,
+                model_name=model_name,
                 worker_id=self._worker_id,
             )
             tel.count_inference(
-                worker_id=self._worker_id, model_name=model_name,
-                provider=provider, status="ok",
+                worker_id=self._worker_id,
+                model_name=model_name,
+                provider=provider,
+                status="ok",
             )
 
             # --- post-process ---
             # Extract spatial dims respecting the model's declared input layout.
             t_pp = time.perf_counter()
             with tracer.start_as_current_span("condor.post_process") as pp_span:
-                pp_span.set_attribute("post_processor", type(self.post_processor).__name__)
+                pp_span.set_attribute(
+                    "post_processor", type(self.post_processor).__name__
+                )
                 try:
                     if model_info.input_layout == "nhwc":
                         # [N, H, W, C] → H = shape[1], W = shape[2]
@@ -311,10 +328,21 @@ class AsyncZMQHandler:
                         # [N, C, H, W] → H = shape[2], W = shape[3]
                         input_h = int(shape[2])
                         input_w = int(shape[3])
-                    result = await self.post_processor.process(outputs, (input_h, input_w))
+                    result = await self.post_processor.process(
+                        outputs, (input_h, input_w)
+                    )
                     num_detections = int((result[:, 1] > 0).sum())
                     pp_span.set_attribute("detections_final", num_detections)
                     infer_span.set_attribute("num_detections", num_detections)
+
+                    current_short = getattr(
+                        self.post_processor,
+                        "active_short_name",
+                        self.post_processor.short_name,
+                    )
+                    if current_short != self._last_postprocessor_short:
+                        self._last_postprocessor_short = current_short
+                        tel.set_active_postprocessor(current_short)
                 except Exception:
                     logger.exception("Post-processing failed.")
                     return _zeros_response()
