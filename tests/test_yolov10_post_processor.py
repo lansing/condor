@@ -6,6 +6,8 @@ Run with:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -15,7 +17,7 @@ from condor.post_process.yolov10 import YoloV10PostProcessor
 @pytest.fixture
 def real_yolov10_output():
     """Load real model output from MDV6-yolov10-c_float16_320.onnx on sample_image.jpg."""
-    data = np.load("/home/max/Code/condor/tests/yolov10_raw_output.npz")
+    data = np.load(Path(__file__).parent / "yolov10_raw_output.npz")
     return data["raw_output"]
 
 

@@ -6,6 +6,8 @@ Run with:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -14,13 +16,13 @@ from condor.post_process.dispatcher import DispatchedPostProcessor
 
 @pytest.fixture
 def real_yolov9_output():
-    data = np.load("/home/max/Code/condor/tests/yolov9_raw_output.npz")
+    data = np.load(Path(__file__).parent / "yolov9_raw_output.npz")
     return data["raw_output"]
 
 
 @pytest.fixture
 def real_yolov10_output():
-    data = np.load("/home/max/Code/condor/tests/yolov10_raw_output.npz")
+    data = np.load(Path(__file__).parent / "yolov10_raw_output.npz")
     return data["raw_output"]
 
 
