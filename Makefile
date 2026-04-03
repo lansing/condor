@@ -1,6 +1,6 @@
 .PHONY: install run test test-client lint \
-        docker-build-tensorrt docker-rebuild-tensorrt \
-        docker-run-tensorrt docker-shell-tensorrt docker-test-tensorrt \
+        docker-build docker-rebuild \
+        docker-run docker-shell docker-test \
         docker-build-tensorrt-build docker-run-tensorrt-build docker-shell-tensorrt-build \
         install-observability-local install-observability-otlp \
         install-tui run-tui tui-host tui-docker
