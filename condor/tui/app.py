@@ -237,7 +237,7 @@ class StatusBanner(Static):
         model_budget = self.size.width - _vis(prefix)
         model = _trunc(self._model, model_budget)
         if self._postprocessor:
-            return f"{prefix}[white]{model}[/white] [[magenta]{self._postprocessor}[/magenta]]"
+            return f"{prefix}[white]{model}[/white] \\[magenta]{self._postprocessor}[/magenta]"
         return f"{prefix}[white]{model}[/white]"
 
 
