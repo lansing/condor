@@ -38,7 +38,7 @@ from opentelemetry.trace import StatusCode
 from ..config.settings import AppConfig
 from ..model_manager.manager import AsyncModelManager
 from ..model_manager.shared import SharedStateRegistry
-from ..post_process.yolov10 import YoloV10PostProcessor
+from ..post_process.dispatcher import DispatchedPostProcessor
 from ..telemetry import tel, tracer
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class AsyncZMQHandler:
             shared_registry=shared_registry,
             infer_sem=infer_sem,
         )
-        self.post_processor = YoloV10PostProcessor(
+        self.post_processor = DispatchedPostProcessor(
             confidence_threshold=config.post_process.confidence_threshold,
             max_detections=config.post_process.max_detections,
         )
