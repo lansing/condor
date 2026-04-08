@@ -2,6 +2,13 @@
 
 Remote TensorRT detector for [Frigate NVR](https://frigate.video). Runs inference on a dedicated GPU and exposes it to Frigate via the ZMQ remote detector protocol.
 
+## Contents
+
+1. [Install](#install)
+   - [Automated installer (recommended)](#automated-installer)
+   - [Manual installation](#manual-installation)
+2. [Build a TensorRT Engine from your ONNX model](#step-2-build-a-tensorrt-engine-from-your-onnx-model)
+
 ## Requirements
 
 - [Frigate NVR](https://frigate.video) 0.17+
@@ -226,13 +233,13 @@ docker compose exec condor condor-tui
 
 ## Step 2: Build a TensorRT engine from your ONNX model
 
-condor requires a TensorRT `.engine` file — it cannot serve ONNX models directly. This is intentional: shipping condor without the TensorRT build toolchain keeps the image small (the NGC TensorRT builder image is several GB). The builder image is only needed once, when you convert your model.
+condor requires a TensorRT `.engine` file — it cannot serve ONNX models directly. This is intentional: shipping condor without the TensorRT build toolchain keeps the image small (the NGC TensorRT builder image is ~10 GB). The builder image is only needed once, when you convert your model.
 
-Frigate must also be configured to point at the engine file rather than an ONNX file. In your Frigate `config.yaml`, set the model path to your `.engine` file:
+Once you have an engine file, update your Frigate `config.yaml` to reference it by filename. If you previously pointed Frigate at an ONNX file, change the extension:
 
 ```yaml
 model:
-  path: /models/your-model.engine
+  path: /models/your-model.engine  # was: your-model.onnx
 ```
 
 > **Why no auto-conversion?** condor's runtime image deliberately excludes the TensorRT builder libraries (`libnvinfer_builder_resource`, ~1.8 GB). Including them would bloat every deployment. Converting once and storing the engine file is the right trade-off.
