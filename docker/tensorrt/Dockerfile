@@ -34,6 +34,7 @@ FROM nvcr.io/nvidia/cuda:13.1.1-base-ubuntu24.04
 
 LABEL org.opencontainers.image.title="condor"
 LABEL org.opencontainers.image.description="Frigate ZMQ remote detector — TensorRT backend (lean)"
+LABEL condor.builder.image="nvcr.io/nvidia/tensorrt:26.01-py3"
 
 # ── TRT runtime .so files ──────────────────────────────────────────────────────
 # Only the inference-time subset is copied.

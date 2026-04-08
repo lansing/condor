@@ -2,6 +2,13 @@
 
 Remote TensorRT detector for [Frigate NVR](https://frigate.video). Runs inference on a dedicated GPU and exposes it to Frigate via the ZMQ remote detector protocol.
 
+## Requirements
+
+- [Frigate NVR](https://frigate.video) 0.17+
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+- NVIDIA Driver 590+
+- Python 3.10+ _(automated installer only)_
+
 ## Install
 
 ### Automated installer
@@ -27,8 +34,6 @@ curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compo
 ```bash
 uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py
 ```
-
-Requires Python 3.10+ and Docker.
 
 #### Installer assumptions
 
@@ -58,13 +63,9 @@ Other flags: `--dry-run`, `-y/--yes`, `--no-backup`, `--force`, `--no-compose`, 
 
 ### Manual installation
 
+
+
 If the installer's assumptions don't match your setup, you can wire everything in by hand. The steps below mirror exactly what the installer does.
-
-#### Prerequisites
-
-- Docker with the NVIDIA container runtime (`nvidia` runtime available in Docker)
-- A Frigate deployment managed by `docker-compose.yml`
-- A `models/` directory on the host containing your TensorRT engine files
 
 #### 1. Add the condor service to `docker-compose.yml`
 
@@ -220,3 +221,46 @@ Otherwise:
 ```bash
 docker compose exec condor condor-tui
 ```
+
+---
+
+## Step 2: Build a TensorRT engine from your ONNX model
+
+condor requires a TensorRT `.engine` file — it cannot serve ONNX models directly. This is intentional: shipping condor without the TensorRT build toolchain keeps the image small (the NGC TensorRT builder image is several GB). The builder image is only needed once, when you convert your model.
+
+Frigate must also be configured to point at the engine file rather than an ONNX file. In your Frigate `config.yaml`, set the model path to your `.engine` file:
+
+```yaml
+model:
+  path: /models/your-model.engine
+```
+
+> **Why no auto-conversion?** condor's runtime image deliberately excludes the TensorRT builder libraries (`libnvinfer_builder_resource`, ~1.8 GB). Including them would bloat every deployment. Converting once and storing the engine file is the right trade-off.
+
+### TensorRT version compatibility
+
+A `.engine` file is compiled for a specific TensorRT version and GPU architecture — it cannot be loaded by a different version of TensorRT, and it may not be portable between GPU generations. **Build your engine on the same machine that will run condor, after condor is installed.**
+
+The `onnx2engine` utility reads condor's image metadata to automatically select the correct TensorRT builder version.
+
+### Convert with the onnx2engine utility
+
+Run from your Frigate project root (condor must be installed and its image present locally):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2engine.sh \
+    | bash -s -- models/your-model.onnx
+```
+
+This produces `models/your-model.engine` alongside the ONNX file. To specify a different output path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2engine.sh \
+    | bash -s -- models/your-model.onnx models/your-model.engine
+```
+
+Options:
+- `--no-fp16` — build an FP32 engine (FP16 is the default and recommended for most GPUs)
+- `--` followed by any arguments — passed directly to `trtexec` (e.g. for dynamic shapes)
+
+The utility will fail with a clear message if the condor image is not found locally, explaining why it is needed.
