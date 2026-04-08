@@ -7,7 +7,7 @@ Remote TensorRT detector for [Frigate NVR](https://frigate.video). Runs inferenc
 1. [Install](#install)
    - [Automated installer (recommended)](#automated-installer)
    - [Manual installation](#manual-installation)
-2. [Build a TensorRT Engine from your ONNX model](#step-2-build-a-tensorrt-engine-from-your-onnx-model)
+2. [Build a TensorRT Engine from your ONNX model](#build-a-tensorrt-engine-from-your-onnx-model)
 
 ## Requirements
 
@@ -231,7 +231,7 @@ docker compose exec condor condor-tui
 
 ---
 
-## Step 2: Build a TensorRT engine from your ONNX model
+## Build a TensorRT engine from your ONNX model
 
 condor requires a TensorRT `.engine` file — it cannot serve ONNX models directly. This is intentional: shipping condor without the TensorRT build toolchain keeps the image small (the NGC TensorRT builder image is ~10 GB). The builder image is only needed once, when you convert your model.
 
