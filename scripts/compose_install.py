@@ -6,16 +6,29 @@
 """
 condor installer — wire condor into a Frigate docker-compose setup.
 
-Usage (with uv — preferred, handles dependencies automatically):
+Usage (recommended — works with interactive prompts):
+    curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py \\
+        -o /tmp/condor_install.py && python3 /tmp/condor_install.py
+
+Usage (with uv — handles dependencies automatically):
     uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py
 
-Usage (with plain python3 — self-bootstraps ruamel.yaml via pip):
+Usage (piped — opens /dev/tty for prompts, same as recommended above):
     curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py | python3 -
-    python3 scripts/compose_install.py         # from repo
+
+Usage (from repo):
+    python3 scripts/compose_install.py
 
 Note: 'uv run python scripts/compose_install.py' does NOT work — it runs the
 script inside the project venv (which lacks ruamel.yaml) instead of treating
 it as a standalone PEP-723 script.  Use 'uv run scripts/compose_install.py'.
+
+Installer assumptions (auto-detected from docker-compose.yml):
+    - Run from your Frigate project root (the directory with docker-compose.yml)
+    - The Frigate service image name contains the word 'frigate'
+    - Frigate mounts a models directory to /models inside the container
+    - Frigate mounts a config directory to /config inside the container
+    - Frigate's config file is at <config_dir>/config.yaml
 
 Phases (all enabled by default):
 
@@ -24,12 +37,13 @@ Phases (all enabled by default):
     [3] tui       Install 'condor' command that opens condor-tui in the container
     [4] detector  Patch Frigate's config.yaml to add zmq detector entries
 
-All file modifications are backed up before editing.
+All file modifications are backed up before editing (filename.ext.bak).
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import importlib
 import os
 import re
@@ -43,16 +57,25 @@ from pathlib import Path
 from typing import Any, Optional
 
 # ── YAML backend bootstrap ─────────────────────────────────────────────────────
-# Must run before any YAML imports.  Sets _YAML_BACKEND to "ruamel" or "pyyaml".
+# Bootstrap is deferred to main() so the banner can print first.
+# All YAML functions check _YAML_BACKEND at call time.
 
 _YAML_BACKEND: str = ""
+_YAML_TEMP_DIR: Optional[Path] = None
+
+
+def _cleanup_yaml_temp() -> None:
+    """Remove the temporary ruamel.yaml installation directory."""
+    global _YAML_TEMP_DIR
+    if _YAML_TEMP_DIR and _YAML_TEMP_DIR.exists():
+        shutil.rmtree(_YAML_TEMP_DIR, ignore_errors=True)
+        _YAML_TEMP_DIR = None
 
 
 def _bootstrap_yaml() -> None:
-    global _YAML_BACKEND
+    global _YAML_BACKEND, _YAML_TEMP_DIR
 
-    # 1. Already importable (common when running inside the condor project venv,
-    #    or the user already has it installed).
+    # 1. Already importable (running inside the condor venv, or already installed).
     try:
         import ruamel.yaml  # noqa: F401
         _YAML_BACKEND = "ruamel"
@@ -60,9 +83,18 @@ def _bootstrap_yaml() -> None:
     except ImportError:
         pass
 
-    # 2. Try to install ruamel.yaml into a temp directory so we don't pollute
-    #    the user's environment.  Requires pip (comes with every CPython).
+    # 2. Install ruamel.yaml into a temp directory — never touches the user's environment.
     tmp = Path(tempfile.mkdtemp(prefix="condor_deps_"))
+    _YAML_TEMP_DIR = tmp
+    atexit.register(_cleanup_yaml_temp)
+
+    print(
+        f"  {_c(_CYAN, 'Note:')} Installing ruamel.yaml into a temporary directory for the\n"
+        f"  installer's use only.  It will be removed automatically when the\n"
+        f"  installer exits.\n"
+        f"    Location: {_path(tmp)}\n"
+    )
+
     try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install",
@@ -76,10 +108,10 @@ def _bootstrap_yaml() -> None:
         _YAML_BACKEND = "ruamel"
         return
     except Exception:
-        pass
+        _cleanup_yaml_temp()
 
-    # 3. Fall back to PyYAML (stdlib-adjacent; often pre-installed on Debian/Ubuntu).
-    #    This works but strips comments from any YAML files we edit.
+    # 3. Fall back to PyYAML (often pre-installed on Debian/Ubuntu).
+    #    Works but strips YAML comments from files we edit.
     try:
         import yaml  # noqa: F401
         _YAML_BACKEND = "pyyaml"
@@ -98,28 +130,21 @@ def _bootstrap_yaml() -> None:
     sys.exit(1)
 
 
-_bootstrap_yaml()
-
-
 # ── Visual constants ───────────────────────────────────────────────────────────
 
-_LOGO = """\
- ██████╗ ██████╗ ███╗   ██╗██████╗  ██████╗ ██████╗
-██╔════╝██╔═══██╗████╗  ██║██╔══██╗██╔═══██╗██╔══██╗
-██║     ██║   ██║██╔██╗ ██║██║  ██║██║   ██║██████╔╝
-██║     ██║   ██║██║╚██╗██║██║  ██║██║   ██║██╔══██╗
-╚██████╗╚██████╔╝██║ ╚████║██████╔╝╚██████╔╝██║  ██║
- ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝"""
+_TAGLINE    = "condor — Remote TensorRT detector for Frigate"
+_HR         = "─" * 56
+_BOLD       = "\033[1m"
+_DIM        = "\033[2m"
+_CYAN       = "\033[36m"
+_GREEN      = "\033[32m"
+_YELLOW     = "\033[33m"
+_RED        = "\033[31m"
+_RESET      = "\033[0m"
 
-_TAGLINE = "Remote TensorRT detector for Frigate"
-_HR     = "─" * 56
-_BOLD   = "\033[1m"
-_DIM    = "\033[2m"
-_CYAN   = "\033[36m"
-_GREEN  = "\033[32m"
-_YELLOW = "\033[33m"
-_RED    = "\033[31m"
-_RESET  = "\033[0m"
+_SCRIPT_URL = (
+    "https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py"
+)
 
 # ── Installer constants ────────────────────────────────────────────────────────
 
@@ -134,8 +159,6 @@ CONDOR_CONFIG_DIR   = "/app/config"
 _FRIGATE_IMAGE_RE = re.compile(r"frigate", re.IGNORECASE)
 
 # ── YAML backend abstraction ───────────────────────────────────────────────────
-# All YAML I/O goes through these four functions so that the rest of the script
-# is backend-agnostic.  ruamel preserves comments; PyYAML strips them (warned).
 
 
 def _yaml_load(path: Path) -> tuple[Any, dict]:
@@ -308,14 +331,6 @@ def _c(code: str, text: str) -> str:
 
 def print_banner() -> None:
     print()
-    print(_c(_CYAN, _LOGO))
-    print()
-    if _YAML_BACKEND == "pyyaml":
-        print(_c(_YELLOW,
-            "  ⚠  ruamel.yaml unavailable — falling back to PyYAML.\n"
-            "     Comments in edited YAML files will be stripped.\n"
-            "     To preserve comments: pip install ruamel.yaml\n"
-        ))
     print(_c(_BOLD, f"  {_TAGLINE}"))
     print(f"  {_HR}")
     print()
@@ -329,135 +344,289 @@ def _path(text: Any) -> str:
     return _c(_DIM, str(text))
 
 
-def _prompt(question: str, default: str = "") -> str:
-    """Single-line prompt; returns default on Enter or EOFError (non-interactive)."""
-    placeholder = f" [{_c(_BOLD, default)}]" if default else ""
+def _open_tty() -> Optional[Any]:
+    """
+    Open /dev/tty for reading when stdin is not a terminal (e.g. piped install).
+    Returns None if stdin is already interactive, or if /dev/tty is unavailable.
+    """
+    if sys.stdin.isatty():
+        return None
     try:
-        answer = input(f"    {question}{placeholder}: ").strip()
+        return open("/dev/tty", "r")
+    except OSError:
+        return None
+
+
+def _prompt(question: str, default: str = "", tty: Optional[Any] = None) -> str:
+    """Single-line prompt; returns default on Enter or if no input is available."""
+    placeholder = f" [{_c(_BOLD, default)}]" if default else ""
+    sys.stdout.write(f"    {question}{placeholder}: ")
+    sys.stdout.flush()
+    src = tty if tty is not None else sys.stdin
+    try:
+        line = src.readline()
+        if not line:
+            raise EOFError
+        answer = line.strip()
     except EOFError:
         print(default)
         return default
     return answer or default
 
 
-def _confirm(prompt: str = "Proceed with installation?") -> bool:
+def _confirm(prompt: str = "Proceed with installation?",
+             tty: Optional[Any] = None) -> bool:
+    """
+    Ask for explicit y/yes confirmation.  Never auto-accepts.
+    Returns True only for 'y' or 'yes'.  Exits if no terminal is available.
+    """
+    src = tty if tty is not None else (sys.stdin if sys.stdin.isatty() else None)
+
+    if src is None:
+        print(
+            f"\n  {_c(_RED, 'Cannot prompt for confirmation:')} stdin is not a terminal\n"
+            "  and /dev/tty is unavailable (e.g. CI, restricted container).\n"
+            "\n"
+            "  Options:\n"
+            "    • Download and run directly (recommended):\n"
+            f"        curl -fsSL {_SCRIPT_URL} -o /tmp/condor_install.py\n"
+            "        python3 /tmp/condor_install.py\n"
+            "    • Pass -y / --yes to accept all defaults non-interactively.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    sys.stdout.write(f"\n  {_c(_BOLD, prompt)} [y/N]: ")
+    sys.stdout.flush()
     try:
-        answer = input(f"\n  {_c(_BOLD, prompt)} [Y/n]: ").strip().lower()
+        line = src.readline()
+        if not line:
+            raise EOFError
+        answer = line.strip().lower()
     except EOFError:
-        return True
-    return answer in ("", "y", "yes")
+        print()
+        print(f"  {_c(_YELLOW, 'Aborted.')} No input received.\n")
+        sys.exit(0)
+
+    return answer in ("y", "yes")
+
+
+def _pyyaml_warning() -> None:
+    if _YAML_BACKEND == "pyyaml":
+        print(_c(_YELLOW,
+            "  ⚠  ruamel.yaml unavailable — falling back to PyYAML.\n"
+            "     Comments in edited YAML files will be stripped.\n"
+            "     To preserve comments: pip install ruamel.yaml\n"
+        ))
 
 
 # ── Interactive planning ───────────────────────────────────────────────────────
 
 
-def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
+def build_plan(args: argparse.Namespace, compose_file: Path,
+               tty: Optional[Any] = None) -> InstallContext:
     """
-    Auto-detect paths from the compose file, show the full plan with prompts
-    for any user-configurable locations, and return a resolved InstallContext.
+    Auto-detect paths from the compose file, display the full plan with
+    a preview of every change, prompt for configurable locations, and
+    return a resolved InstallContext.
     """
     _, data = _yaml_load(compose_file)
     services: dict = data.get("services") or {}
     if not services:
         sys.exit("error: no 'services' key found in compose file")
 
+    # ── Auto-detection ─────────────────────────────────────────────────────────
     try:
         frigate_name = args.frigate_service or detect_frigate_service(services)
     except RuntimeError as e:
-        sys.exit(f"error: {e}")
+        print(f"\n  {_c(_RED, 'Auto-detection failed:')} {e}\n")
+        print("  The installer looks for a service whose image name contains 'frigate'.")
+        print("  Make sure you are running from your Frigate project root (the directory")
+        print("  containing docker-compose.yml) and that your Frigate service image is")
+        print("  named something like 'ghcr.io/blakeblackshear/frigate:...'.")
+        print(f"\n  You can also specify it explicitly:  --frigate-service NAME\n")
+        sys.exit(1)
 
     frigate_svc = services[frigate_name]
 
     try:
         models_dir = args.models_dir or detect_models_dir(frigate_svc)
     except RuntimeError as e:
-        sys.exit(f"error: {e}")
+        print(f"\n  {_c(_RED, 'Auto-detection failed:')} {e}\n")
+        print("  The installer looks for a volume mapped to '/models' in your Frigate")
+        print("  service. Make sure your docker-compose.yml maps a local models directory,")
+        print("  for example:")
+        print("      volumes:")
+        print("        - ./models:/models")
+        print(f"\n  You can also specify it explicitly:  --models-dir PATH\n")
+        sys.exit(1)
 
     config_dir = detect_config_dir(frigate_svc)
 
-    # ── Plan display ───────────────────────────────────────────────────────────
+    # ── Precompute preview values ──────────────────────────────────────────────
+    compose_dir       = compose_file.parent
+    run_dir           = compose_dir / "run"
+    run_rel           = "./run"
     condor_config_path = Path(config_dir) / "condor" / "config.yaml"
-    run_dir            = compose_file.parent / "run"
-    condor_config_bak  = condor_config_path.with_suffix(
-        condor_config_path.suffix + ".bak"
-    ) if condor_config_path.exists() else None
-    compose_bak = compose_file.with_suffix(compose_file.suffix + ".bak")
+    compose_bak       = compose_file.with_suffix(compose_file.suffix + ".bak")
 
+    config_condor_rel = os.path.join(config_dir, "condor")
+    if not config_condor_rel.startswith("."):
+        config_condor_rel = "./" + config_condor_rel
+
+    # ── Plan header ────────────────────────────────────────────────────────────
     print(f"  {_c(_BOLD, 'The following steps will be performed:')}\n")
 
+    # ── Phase 1: compose ───────────────────────────────────────────────────────
     if args.compose:
         print(f"  {_c(_BOLD, '[1] docker-compose.yml')}")
         print(_bullet(f"Add {_c(_CYAN, CONDOR_IMAGE)} service"))
-        print(_bullet(f"Add {_c(_CYAN, 'depends_on: condor')} "
-                      f"(condition: service_healthy) to '{frigate_name}'"))
-        print(_bullet(f"Create {_path(run_dir)}/ for stats socket bind-mount"))
-        print(f"      File:   {_path(compose_file)}")
-        print(f"      Backup: {_path(compose_bak)}")
+        print(_bullet(
+            f"Add {_c(_CYAN, 'depends_on: condor')} "
+            f"(condition: service_healthy) to '{frigate_name}'"
+        ))
+        print(_bullet(f"Create {_path(run_dir)}/ for the stats socket bind-mount"))
         print()
 
+        print(f"      Service block to be added to {_path(compose_file)}:")
+        print()
+        _print_block(f"""\
+condor:
+  image: {CONDOR_IMAGE}
+  runtime: nvidia
+  restart: unless-stopped
+  volumes:
+    - {models_dir}:{CONDOR_MODELS_DIR}
+    - {config_condor_rel}:{CONDOR_CONFIG_DIR}
+    - {run_rel}:{CONDOR_STATS_DIR}
+  environment:
+    - CONDOR_STATS_SOCKET={CONDOR_STATS_SOCKET}
+  healthcheck:
+    test: [CMD-SHELL, "python3 -c 'import socket,sys; ...tcp:{args.port}...'"]
+    interval: 5s  timeout: 3s  retries: 12  start_period: 15s
+""")
+
+        print(f"      Change to '{frigate_name}' in {_path(compose_file)}:")
+        print()
+        _print_block(f"""\
+{frigate_name}:
+  depends_on:
+    condor:
+      condition: service_healthy   # added
+""")
+        print()
+
+    # ── Phase 2: condor config (note only) ────────────────────────────────────
     if args.config:
         print(f"  {_c(_BOLD, '[2] Condor config')}")
-        print(_bullet("Write starter config.yaml with sensible defaults"))
+        print(_bullet("Write a starter config.yaml with sensible defaults"))
         print(f"      File:   {_path(condor_config_path)}")
-        if condor_config_bak:
-            print(f"      Backup: {_path(condor_config_bak)}")
+        if condor_config_path.exists():
+            print(f"      {_c(_YELLOW, '⚠')}  File already exists — "
+                  "will be skipped (use --force to overwrite).")
         else:
-            print(f"      {_c(_DIM, '(new file — no backup needed)')}")
+            print(f"      {_c(_DIM, '(new file)')}")
         print()
 
-    # Phase 3: bin dir prompt.
+    # ── Phase 3: TUI launcher ─────────────────────────────────────────────────
     bin_dir = args.bin_dir
     if args.tui:
         print(f"  {_c(_BOLD, '[3] TUI launcher')}")
         print(_bullet(
-            f"Install {_c(_CYAN, 'condor')} command "
-            f"— opens condor-tui inside the running container"
+            f"Install {_c(_CYAN, 'condor')} command — "
+            f"opens condor-tui inside the running container"
         ))
         default_bin = bin_dir or detect_bin_dir()
-        if args.yes or not sys.stdout.isatty():
+        if args.yes:
             bin_dir = default_bin
-            print(f"      Install to: {_path(Path(bin_dir) / 'condor')}")
+            print(f"      Install to: {_path(Path(default_bin) / 'condor')}")
         else:
-            bin_dir = _prompt("      Install to", default_bin)
-            launcher = Path(bin_dir) / "condor"
-            if launcher.exists():
-                print(f"      File:   {_path(launcher)}")
-                print(f"      Backup: {_path(launcher.with_name('condor.bak'))}")
-            else:
-                print(f"      File:   {_path(launcher)}")
+            bin_dir = _prompt("      Install to", default_bin, tty=tty)
+        launcher = Path(bin_dir) / "condor"
+        print(f"      File:   {_path(launcher)}")
         print()
 
-    # Phase 4: frigate config file prompt.
+    # ── Phase 4: Frigate detector config ──────────────────────────────────────
     frigate_cfg_file: Optional[Path] = None
     if args.detector:
         frigate_cfg_default = detect_frigate_config_file(config_dir, compose_file)
         print(f"  {_c(_BOLD, '[4] Frigate detector config')}")
         print(_bullet(
-            f"Add zmq detector entries pointing to condor "
+            f"Add zmq detector entries to Frigate's config.yaml "
             f"(port {args.port}, {args.num_workers} worker"
             f"{'s' if args.num_workers > 1 else ''})"
         ))
-        if args.yes or not sys.stdout.isatty():
+        if args.yes:
             frigate_cfg_file = frigate_cfg_default
             print(f"      File:   {_path(frigate_cfg_file)}")
         else:
-            raw = _prompt("      Edit file", str(frigate_cfg_default))
+            raw = _prompt("      Edit file", str(frigate_cfg_default), tty=tty)
             frigate_cfg_file = Path(raw)
-            if frigate_cfg_file.exists():
-                print(f"      Backup: {_path(frigate_cfg_file.with_suffix(frigate_cfg_file.suffix + '.bak'))}")
-            else:
-                print(f"      {_c(_YELLOW, '⚠  file not found — will skip if missing at run time')}")
+            if not frigate_cfg_file.exists():
+                print(f"      {_c(_YELLOW, '⚠')}  file not found — "
+                      "will skip if missing at run time")
+
         print()
+        print(f"      Detector entries to be added to {_path(frigate_cfg_file)}:")
+        print()
+
+        detector_lines = ["detectors:"]
+        for i in range(args.num_workers):
+            name = f"condor_{i}" if args.num_workers > 1 else "condor"
+            port = args.port + i
+            detector_lines.append(f"  {name}:")
+            detector_lines.append(f"    type: zmq")
+            detector_lines.append(f"    endpoint: tcp://{CONDOR_SERVICE_NAME}:{port}")
+        _print_block("\n".join(detector_lines) + "\n")
+        print()
+
+    # ── Backup notice ──────────────────────────────────────────────────────────
+    files_to_backup: list[tuple[Path, Path]] = []
+
+    if args.compose and compose_file.exists():
+        files_to_backup.append((compose_file, compose_bak))
+
+    if args.tui and bin_dir:
+        launcher_path = Path(bin_dir) / "condor"
+        if launcher_path.exists():
+            files_to_backup.append(
+                (launcher_path, launcher_path.with_name("condor.bak"))
+            )
+
+    if args.config and condor_config_path.exists() and args.force:
+        files_to_backup.append((
+            condor_config_path,
+            condor_config_path.with_suffix(condor_config_path.suffix + ".bak"),
+        ))
+
+    if args.detector and frigate_cfg_file and frigate_cfg_file.exists():
+        files_to_backup.append((
+            frigate_cfg_file,
+            frigate_cfg_file.with_suffix(frigate_cfg_file.suffix + ".bak"),
+        ))
+
+    if files_to_backup:
+        print(f"  {_c(_YELLOW + _BOLD, '⚠  Backups')}  "
+              f"The following files will be backed up before modification:\n")
+        for src, bak in files_to_backup:
+            print(f"    {_path(src)}")
+            print(f"      → {_path(bak)}")
+        print()
+    else:
+        print(f"  {_c(_DIM, 'No existing files will be overwritten (all new).')}\n")
+
+    resolved_bin_dir = bin_dir or detect_bin_dir()
+    resolved_frigate_cfg = frigate_cfg_file or detect_frigate_config_file(
+        config_dir, compose_file
+    )
 
     return InstallContext(
         compose_file=compose_file,
         frigate_service_name=frigate_name,
         models_dir=models_dir,
         frigate_config_dir=config_dir,
-        bin_dir=bin_dir or detect_bin_dir(),
-        frigate_config_file=frigate_cfg_file or detect_frigate_config_file(
-            config_dir, compose_file
-        ),
+        bin_dir=resolved_bin_dir,
+        frigate_config_file=resolved_frigate_cfg,
         num_workers=args.num_workers,
         condor_port=args.port,
         dry_run=args.dry_run,
@@ -465,6 +634,12 @@ def build_plan(args: argparse.Namespace, compose_file: Path) -> InstallContext:
         yes=args.yes,
         force=args.force,
     )
+
+
+def _print_block(text: str, indent: str = "        ") -> None:
+    """Print a code-like block with consistent indentation and dim colour."""
+    for line in text.rstrip("\n").splitlines():
+        print(_c(_DIM, indent + line))
 
 
 # ── Phase 1: docker-compose ────────────────────────────────────────────────────
@@ -509,8 +684,8 @@ def _build_condor_service(ctx: InstallContext) -> dict:
 
 
 def _ensure_depends_on(frigate_svc: dict) -> None:
-    dep_entry         = _new_map({"condition": "service_healthy"})
-    existing          = frigate_svc.get("depends_on")
+    dep_entry = _new_map({"condition": "service_healthy"})
+    existing  = frigate_svc.get("depends_on")
 
     if existing is None:
         frigate_svc["depends_on"] = _new_map({CONDOR_SERVICE_NAME: dep_entry})
@@ -534,7 +709,6 @@ def install_compose(ctx: InstallContext) -> None:
         print(f"      {_c(_YELLOW, '⚠')}  '{CONDOR_SERVICE_NAME}' service already present — skipping.")
         return
 
-    # Prepend condor before all existing services.
     new_services = _new_map({CONDOR_SERVICE_NAME: _build_condor_service(ctx)})
     for k, v in services.items():
         new_services[k] = v
@@ -661,7 +835,6 @@ def install_tui(ctx: InstallContext) -> None:
     launcher.chmod(0o755)
     print(f"      {_c(_GREEN, '✓')} Wrote {launcher} (chmod 755)")
 
-    # Warn if the chosen dir isn't on PATH.
     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
     resolved  = [str(Path(p).resolve()) for p in path_dirs if p]
     if str(bin_dir.resolve()) not in resolved:
@@ -690,7 +863,6 @@ def install_detector(ctx: InstallContext) -> None:
 
     detectors: dict = data["detectors"]
 
-    # Build new detector entries (one per worker).
     new_entries: dict[str, dict] = {}
     for i in range(ctx.num_workers):
         name  = f"condor_{i}" if ctx.num_workers > 1 else "condor"
@@ -730,23 +902,45 @@ def install_detector(ctx: InstallContext) -> None:
 # ── Post-install summary ───────────────────────────────────────────────────────
 
 
-def print_next_steps(ctx: InstallContext, phases: dict) -> None:
+def print_summary(ctx: InstallContext, phases_run: dict) -> None:
+    print(f"\n  {_HR}")
+    print(f"  {_c(_BOLD, 'Changes made:')}\n")
+
+    if phases_run.get("compose"):
+        print(f"    {_c(_GREEN, '✓')} {_path(ctx.compose_file)}")
+        print(f"         condor service added; depends_on wired to "
+              f"'{ctx.frigate_service_name}'")
+    if phases_run.get("config"):
+        config_file = Path(ctx.condor_config_host_dir) / "config.yaml"
+        print(f"    {_c(_GREEN, '✓')} {_path(config_file)}")
+        print(f"         starter condor config written")
+    if phases_run.get("tui"):
+        print(f"    {_c(_GREEN, '✓')} {_path(ctx.condor_launcher_path)}")
+        print(f"         'condor' TUI launcher installed")
+    if phases_run.get("detector"):
+        print(f"    {_c(_GREEN, '✓')} {_path(ctx.frigate_config_file)}")
+        print(f"         zmq detector entries added")
+
+    print(f"\n  {_HR}")
+    print(f"  {_c(_BOLD, 'Next steps:')}\n")
+
     steps = []
 
-    if phases.get("detector"):
+    if phases_run.get("detector"):
         steps.append(
-            "Verify the detector entries in your Frigate config "
-            f"({ctx.frigate_config_file.name}) and confirm the model path is set."
+            f"Review the detector entries in {_path(ctx.frigate_config_file.name)}\n"
+            f"         and confirm the model path is set correctly."
         )
 
     steps.append(
-        f"Start the stack:\n"
+        f"Restart the stack to pick up all changes:\n"
+        f"         {_c(_DIM, f'docker compose -f {ctx.compose_file} down')}\n"
         f"         {_c(_DIM, f'docker compose -f {ctx.compose_file} up -d')}"
     )
 
-    if phases.get("tui"):
+    if phases_run.get("tui"):
         steps.append(
-            f"Monitor condor (from any terminal):\n"
+            f"Monitor condor (from any terminal, once the stack is up):\n"
             f"         {_c(_DIM, 'condor')}"
         )
     else:
@@ -755,10 +949,9 @@ def print_next_steps(ctx: InstallContext, phases: dict) -> None:
             f"         {_c(_DIM, 'docker compose exec condor condor-tui')}"
         )
 
-    print(f"\n  {_HR}")
-    print(f"  {_c(_BOLD, 'Next steps:')}\n")
     for i, step in enumerate(steps, 1):
         print(f"  {i}. {step}\n")
+
     print(f"  {_HR}\n")
 
 
@@ -819,7 +1012,6 @@ def main() -> None:
         if not compose_file.exists():
             sys.exit(f"error: compose file not found: {compose_file}")
     else:
-        # Try both common extensions in preference order.
         for name in ("docker-compose.yml", "docker-compose.yaml",
                      "compose.yml", "compose.yaml"):
             candidate = Path.cwd() / name
@@ -831,41 +1023,50 @@ def main() -> None:
                 "error: no compose file found in current directory.\n"
                 "       Tried: docker-compose.yml, docker-compose.yaml, "
                 "compose.yml, compose.yaml\n"
-                "       Pass the path explicitly: python3 install.py <file>"
+                "       Pass the path explicitly: python3 install.py <file>\n"
+                "       Or run this installer from your Frigate project root."
             )
 
     print_banner()
+    _bootstrap_yaml()
+    _pyyaml_warning()
 
-    ctx = build_plan(args, compose_file)
+    tty = _open_tty()
+    try:
+        ctx = build_plan(args, compose_file, tty=tty)
 
-    if not args.dry_run and not args.yes:
-        if not _confirm():
-            print(f"\n  {_c(_YELLOW, 'Aborted.')} No files were changed.\n")
-            sys.exit(0)
+        if not args.dry_run and not args.yes:
+            if not _confirm(tty=tty):
+                print(f"\n  {_c(_YELLOW, 'Aborted.')} No files were changed.\n")
+                sys.exit(0)
 
-    print()
-    phases_run: dict[str, bool] = {}
+        print()
+        phases_run: dict[str, bool] = {}
 
-    if args.compose:
-        install_compose(ctx)
-        phases_run["compose"] = True
+        if args.compose:
+            install_compose(ctx)
+            phases_run["compose"] = True
 
-    if args.config:
-        install_config(ctx)
-        phases_run["config"] = True
+        if args.config:
+            install_config(ctx)
+            phases_run["config"] = True
 
-    if args.tui:
-        install_tui(ctx)
-        phases_run["tui"] = True
+        if args.tui:
+            install_tui(ctx)
+            phases_run["tui"] = True
 
-    if args.detector:
-        install_detector(ctx)
-        phases_run["detector"] = True
+        if args.detector:
+            install_detector(ctx)
+            phases_run["detector"] = True
 
-    if not args.dry_run:
-        print_next_steps(ctx, phases_run)
-    else:
-        print(f"\n  {_c(_YELLOW, 'Dry run complete — no files were written.')}\n")
+        if args.dry_run:
+            print(f"\n  {_c(_YELLOW, 'Dry run complete — no files were written.')}\n")
+        else:
+            print_summary(ctx, phases_run)
+
+    finally:
+        if tty:
+            tty.close()
 
 
 if __name__ == "__main__":
