@@ -25,7 +25,7 @@
 FROM nvcr.io/nvidia/tensorrt:26.01-py3
 
 LABEL org.opencontainers.image.title="condor"
-LABEL org.opencontainers.image.description="Frigate ZMQ remote detector — TensorRT backend"
+LABEL org.opencontainers.image.description="TensorRT sidecar for Frigate — build environment"
 
 # curl: needed to bootstrap uv.
 # libglib2.0-0: runtime dep of opencv-python-headless.

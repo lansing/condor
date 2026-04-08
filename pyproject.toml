@@ -1,7 +1,7 @@
 [project]
 name = "condor"
 version = "0.1.0"
-description = "Async Frigate ZMQ remote object detector server"
+description = "TensorRT sidecar for Frigate"
 requires-python = ">=3.12, <3.13"
 dependencies = [
     "pyzmq>=26.0",

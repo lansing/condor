@@ -132,7 +132,7 @@ def _bootstrap_yaml() -> None:
 
 # ── Visual constants ───────────────────────────────────────────────────────────
 
-_TAGLINE    = "condor — Remote TensorRT detector for Frigate"
+_TAGLINE    = "condor — TensorRT sidecar for Frigate"
 _HR         = "─" * 56
 _BOLD       = "\033[1m"
 _DIM        = "\033[2m"

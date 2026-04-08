@@ -33,7 +33,7 @@ FROM nvcr.io/nvidia/tensorrt:26.01-py3 AS trt-libs
 FROM nvcr.io/nvidia/cuda:13.1.1-base-ubuntu24.04
 
 LABEL org.opencontainers.image.title="condor"
-LABEL org.opencontainers.image.description="Frigate ZMQ remote detector — TensorRT backend (lean)"
+LABEL org.opencontainers.image.description="TensorRT sidecar for Frigate — lean runtime"
 LABEL condor.builder.image="nvcr.io/nvidia/tensorrt:26.01-py3"
 
 # ── TRT runtime .so files ──────────────────────────────────────────────────────
