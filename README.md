@@ -1,24 +1,84 @@
 # condor
 
-TensorRT sidecar for [Frigate NVR](https://frigate.video). Runs inference on a dedicated GPU and exposes it to Frigate via the ZMQ remote detector protocol.
-
-## Contents
-
-1. [Install](#install)
-   - [Automated installer (recommended)](#automated-installer)
-   - [Manual installation](#manual-installation)
-2. [Build a TensorRT Engine from your ONNX model](#build-a-tensorrt-engine-from-your-onnx-model)
+TensorRT sidecar for [Frigate NVR](https://frigate.video). Efficienctly runs inference on a dedicated NVIDIA GPU and exposes it to Frigate via the ZMQ remote detector protocol. Provides significantly better FPS throughput and GPU utilization, with less CPU and host memory usage, compared to Frigate's built-in ONNX Runtime detector.
 
 ## Requirements
 
 - [Frigate NVR](https://frigate.video) 0.17+
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 - NVIDIA Driver 590+
-- Python 3.10+ _(automated installer only)_
+- Python on your system _(for automated installer only)_
 
 ## Install
 
-### Automated installer
+1. [Install](#install)
+   - [Automated installer (recommended)](#automated-installer)
+   - [Manual installation](#manual-installation) 
+2. [Build a TensorRT Engine from your ONNX model](#build-a-tensorrt-engine-from-your-onnx-model)
+
+## FAQ
+
+**Why would I use this instead of Frigate's built in detector?**
+
+Condor provides an optimized, TensorRT-backed inference runtime with significantly better efficiency and throughput compared to what Frigate offers out of the box via its ONNX Runtime (CUDA EP) backend. For mid-range GPUs, expect to see 1.5-2x throughput compared to ONNX Runtime with CUDA EP.
+
+Condor has a lower memory footprint (500-600 MB compared to 1+ GB for ONNX Runtime), and better efficiency on the CPU side.
+
+---
+
+**What GPUs are supported?**
+
+NVIDIA GPUs from Turing (RTX 20 series) onward.
+
+---
+
+**What detector model architectures are supported?**
+
+YOLOv9 and YOLOv10 are currently supported. Most likely, earlier YOLO variants would also work, as (AFAIK) their tensor input/output formats are compatible with YOLOv9.
+ 
+If you'd like to see another architecture supported, please reach out.
+
+---
+
+**What model should I use with Condor?**
+
+I recommend MegaDetector V6 in YOLOv10. This model provides excellent performance for a typical Frigate home setup. 
+
+> Check out [pytorch-wildlife-onnx](https://github.com/lansing/pytorch-wildlife-onnx) for an easy way to export TensorRT (or ONNX) artifacts of this model. 
+
+I get over 90 FPS max throughput on an RTX 3050 6GB, limited to 50 watts, using MegaDetector V6, YOLOv10 Extra, 640x640, int8 quantization, exported using pytorch-wildlife-onnx.
+
+---
+
+**How can I use Condor as my inference provider for Frigate?**
+
+First, [convert your ONNX model to a TensorRT Engine](#build-a-tensorrt-engine-from-your-onnx-model). Then, [configure Frigate to use Condor](#install) as a remote detector server.
+
+If you use MDV6 model via [my exporter project](https://github.com/lansing/pytorch-wildlife-onnx) as mentioned above, you can export directly to TensorRT engine.
+
+---
+
+**Besides efficiency, are there any other benefits to using Condor/TensorRT?**
+
+A few to mention.
+
+* YOLOv10 support: as of writing, Frigate does not support YOLOv10, but Condor does.
+* int8 model support: ONNX Runtime CUDA EP has weak support for int8 quantized models. Condor can run quantized TRT engines without issue.
+* TUI with fine-graned metrics across the inference lifecycle per frame.
+
+---
+
+**Why is TensorRT more efficient than ONNX Runtime/CUDA EP??** 
+
+Condor is essentially a server and orchestration wrapper around TensorRT, an inference runtime provided by NVIDIA. In short, TensorRT builds an engine (essentially a compiled artifact for a specific model) that has been tuned to provide the best performance for your particular hardware. A model architecture describes a computational graph, but for any given architecture there exist various low-level approaches to executing that graph on hardware. TensorRT provides numerous highly optimized building blocks, called kernels, that execute different portions of the graph defined by a model architecture. When building the engine, TensorRT experiments with various kernels and scheduling regimes to find the combination that maximizes efficiency for a given hardware platform.
+
+ONNX Runtime, with its CUDA EP, also executes your model using efficient kernels, but the scope of optimization is less aggressive compared to TensorRT. 
+
+Condor also has improved efficiency on the CPU side of things by running multiple inference threads in a single process while synchronizing the GPU utilization (i.e. only one thread is waiting on GPU at a time, meanwhile the others can transfer data between host and device, post-process the model output, communicate with frigate etc). This results in very high GPU utilization and maximum FPS with minimum resources on the host side. You can expect to max out any GPU with about ~1 CPU core utilized, and about a half gig of host memory.
+
+---
+
+## Automated installer
 
 Run the installer from your Frigate project root (the directory containing your `docker-compose.yml`). It will:
 
@@ -42,19 +102,9 @@ curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compo
 uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py
 ```
 
-#### Installer assumptions
+### Installer Options
 
-The installer auto-detects your setup by reading `docker-compose.yml`. It assumes:
-
-| What | Assumption |
-|---|---|
-| Working directory | Your Frigate project root (contains `docker-compose.yml`) |
-| Frigate service | A compose service whose `image:` name contains the word `frigate` |
-| Models directory | A volume in the Frigate service mapped to `/models` inside the container (e.g. `./models:/models`) |
-| Config directory | A volume mapped to `/config` inside the container (e.g. `./config:/config`); defaults to `./config` if not found |
-| Frigate config file | `<config_dir>/config.yaml` (or `.yml`) |
-
-If any assumption doesn't hold, the installer will print what it expected and exit with a helpful message. Use the flags below to override:
+For a typical install you probably don't need to specify any of these, but in case you do:
 
 ```
 --frigate-service NAME   Compose service name for Frigate
@@ -64,15 +114,13 @@ If any assumption doesn't hold, the installer will print what it expected and ex
 --num-workers N          Number of condor workers (default: 1)
 ```
 
-Other flags: `--dry-run`, `-y/--yes`, `--no-backup`, `--force`, `--no-compose`, `--no-config`, `--no-tui`, `--no-detector`.
+Other flags: `--dry-run`, `-y/--yes`
 
 ---
 
 ### Manual installation
 
-
-
-If the installer's assumptions don't match your setup, you can wire everything in by hand. The steps below mirror exactly what the installer does.
+Alternatively, you can wire everything in by hand. The steps below mirror exactly what the installer does.
 
 #### 1. Add the condor service to `docker-compose.yml`
 
@@ -233,7 +281,11 @@ docker compose exec condor condor-tui
 
 ## Build a TensorRT engine from your ONNX model
 
-condor requires a TensorRT `.engine` file — it cannot serve ONNX models directly. This is intentional: shipping condor without the TensorRT build toolchain keeps the image small (the NGC TensorRT builder image is ~10 GB). The builder image is only needed once, when you convert your model.
+condor requires a TensorRT `.engine` file, and it cannot serve ONNX models directly.
+
+>If you're looking for a first model to test Condor with, I recommend using [pytorch-wildlife-onnx](https://github.com/lansing/pytorch-wildlife-onnx) to export a MegaDetector V6 YOLOv10 model into TensorRT `.engine` format. This is what I use with Condor.
+
+We offer some scripts below to convert an ONNX model using NVIDIA's TensorRT base image. The builder image is only needed once, when you convert your model. This size of this image (10+ GB) is one reason we don't include this functionality in Condor.
 
 Once you have an engine file, update your Frigate `config.yaml` to reference it by filename. If you previously pointed Frigate at an ONNX file, change the extension:
 
@@ -242,17 +294,17 @@ model:
   path: /models/your-model.engine  # was: your-model.onnx
 ```
 
-> **Why no auto-conversion?** condor's runtime image deliberately excludes the TensorRT builder libraries (`libnvinfer_builder_resource`, ~1.8 GB). Including them would bloat every deployment. Converting once and storing the engine file is the right trade-off.
-
 ### TensorRT version compatibility
 
-A `.engine` file is compiled for a specific TensorRT version and GPU architecture — it cannot be loaded by a different version of TensorRT, and it may not be portable between GPU generations. **Build your engine on the same machine that will run condor, after condor is installed.**
+A `.engine` file is compiled for a specific TensorRT version and GPU architecture. Generally speaking, it cannot be loaded by a different version of TensorRT, and it may not be portable between GPU generations. **Build your engine on the same machine that will run condor.**
 
-The `onnx2engine` utility reads condor's image metadata to automatically select the correct TensorRT builder version.
+As of this release, Condor uses **TensorRT 26.01** and `.engine` files must be built using this version of TensorRT, to be used with Condor.
 
-### Convert with the onnx2engine utility
+### Convert an ONNX model
 
-Run from your Frigate project root (condor must be installed and its image present locally):
+To simplify matters slightly, we provide the following `onnx2engine.sh` script. This script will examine the currently installed Condor container image to ensure the right TensorRT builder image is used, and the convert the specified ONNX model to TRT engine.
+
+Run the following (condor must be installed and its image present locally), replacing the model path appropriately:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2engine.sh \
@@ -267,7 +319,9 @@ curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2
 ```
 
 Options:
-- `--no-fp16` — build an FP32 engine (FP16 is the default and recommended for most GPUs)
-- `--` followed by any arguments — passed directly to `trtexec` (e.g. for dynamic shapes)
+- `--no-fp16`: build an FP32 engine (FP16 is the default and recommended for most GPUs)
+- `--` followed by any arguments: passed directly to `trtexec` (e.g. for dynamic shapes)
 
-The utility will fail with a clear message if the condor image is not found locally, explaining why it is needed.
+## AI Use Disclosure
+
+Much of the code in this project was written using AI assistance. In particular, the TUI, ZMQ handler and installer utilities were essentially "vibe coded". The core inference orchestration (`tensorrt_backend.py`) was prototyped using AI assistance, then rewritten and optimized by hand. This README was written by a human.
