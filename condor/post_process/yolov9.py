@@ -1,6 +1,6 @@
 """YOLOv9 post-processor for yolo-generic model output.
 
-YOLOv9 models exported from Ultralytics output a single tensor of shape
+YOLOv9 models output a single tensor of shape
 ``(1, num_attributes, num_predictions)`` where:
     - num_attributes = 4 (box xywh) + num_classes
     - For 3 classes: (1, 7, 33600)
