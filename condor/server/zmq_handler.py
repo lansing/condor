@@ -1,27 +1,3 @@
-"""Async ZMQ REP server and Frigate protocol dispatcher.
-
-Architecture
-------------
-* A single ``asyncio`` event loop runs ``AsyncZMQHandler.run()``.
-* The loop calls ``await socket.recv_multipart()`` (non-blocking thanks to
-  ``zmq.asyncio``) and dispatches each request.
-* Heavy operations (ONNX inference, file I/O, post-processing) are already
-  wrapped in ``asyncio.to_thread`` at lower layers, so the event loop is
-  never blocked.
-
-Protocol dispatch
------------------
-Frame 0 (JSON header) determines request type:
-  ``model_request`` → model availability check
-  ``model_data``    → model file transfer
-  anything else     → inference request
-
-State machine
--------------
-``_active_model`` tracks the model negotiated during the last successful
-Model Management handshake.  All subsequent inference requests target it.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -52,7 +28,6 @@ def _zeros_response() -> list[bytes]:
 
 
 class AsyncZMQHandler:
-    """Async ZMQ REP socket + Frigate protocol dispatcher."""
 
     def __init__(
         self,
@@ -81,10 +56,6 @@ class AsyncZMQHandler:
         self._ctx = zmq.asyncio.Context()
         self._socket: zmq.asyncio.Socket = self._ctx.socket(zmq.REP)  # type: ignore[attr-defined]
         self._running = False
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
 
     async def run(self) -> None:
         endpoint = self._endpoint
@@ -123,10 +94,6 @@ class AsyncZMQHandler:
 
     async def shutdown(self) -> None:
         self._running = False
-
-    # ------------------------------------------------------------------
-    # Dispatcher
-    # ------------------------------------------------------------------
 
     async def _dispatch(self, frames: list[bytes]) -> list[bytes]:
         try:
@@ -171,19 +138,14 @@ class AsyncZMQHandler:
         )
         return result
 
-    # ------------------------------------------------------------------
-    # Model management handlers
-    # ------------------------------------------------------------------
-
     async def _handle_model_request(self, header: dict) -> list[bytes]:
-        """Stage 1A – model availability check."""
         model_name: str = header.get("model_name", "")
 
         model_available = self.manager.model_exists(model_name)
         model_loaded = False
 
         if model_available:
-            # Try to load; if already the active model this is a no-op lock acquire
+            # If ``model_name`` is already the active model, this is a no-op lock acquire
             if self.manager.active_model != model_name:
                 model_loaded = await self.manager.load_model(model_name)
             else:
@@ -198,7 +160,6 @@ class AsyncZMQHandler:
         return [json.dumps(resp).encode()]
 
     async def _handle_model_data(self, header: dict, data: bytes) -> list[bytes]:
-        """Stage 1B – receive model file from Frigate and load it."""
         model_name: str = header.get("model_name", "")
 
         saved = await self.manager.save_model(model_name, data)
@@ -210,24 +171,17 @@ class AsyncZMQHandler:
         logger.info("Model data '%s' → %s", model_name, resp)
         return [json.dumps(resp).encode()]
 
-    # ------------------------------------------------------------------
-    # Inference handler
-    # ------------------------------------------------------------------
-
     async def _handle_inference(
         self, header: dict, tensor_bytes: bytes | None
     ) -> list[bytes]:
-        """Stage 2 – run inference on the active model."""
         if tensor_bytes is None:
             logger.error("Inference request missing tensor frame.")
             return _zeros_response()
 
         backend = self.manager.backend
         if backend is None:
-            # 1. Another worker may have loaded via the shared registry.
             await self.manager.lazy_load_from_registry()
-            # 2. After a full Condor restart Frigate may skip the model-request
-            #    handshake (it thinks the model is still loaded).  Scan disk.
+            # In case Condor hard restarts while Frigate has not... F thinks model is already loaded
             if self.manager.backend is None:
                 await self.manager.auto_load_from_disk()
             backend = self.manager.backend
@@ -268,7 +222,6 @@ class AsyncZMQHandler:
                     return _zeros_response()
                 dv_span.set_attribute("mismatch", False)
 
-            # --- reconstruct tensor ---
             with tracer.start_as_current_span("condor.tensor.reconstruct") as tr_span:
                 try:
                     shape = tuple(int(d) for d in header["shape"])
@@ -283,7 +236,6 @@ class AsyncZMQHandler:
                     )
                     return _zeros_response()
 
-            # --- inference ---
             infer_span.set_attribute("input_shape", str(shape))
             t_infer = time.perf_counter()
             try:
@@ -312,8 +264,6 @@ class AsyncZMQHandler:
                 status="ok",
             )
 
-            # --- post-process ---
-            # Extract spatial dims respecting the model's declared input layout.
             t_pp = time.perf_counter()
             with tracer.start_as_current_span("condor.post_process") as pp_span:
                 pp_span.set_attribute(
@@ -321,11 +271,9 @@ class AsyncZMQHandler:
                 )
                 try:
                     if model_info.input_layout == "nhwc":
-                        # [N, H, W, C] → H = shape[1], W = shape[2]
                         input_h = int(shape[1])
                         input_w = int(shape[2])
                     else:
-                        # [N, C, H, W] → H = shape[2], W = shape[3]
                         input_h = int(shape[2])
                         input_w = int(shape[3])
                     result = await self.post_processor.process(

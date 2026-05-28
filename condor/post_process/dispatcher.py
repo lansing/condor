@@ -1,5 +1,3 @@
-"""Auto-detecting post-processor that dispatches to the appropriate model-specific handler."""
-
 from __future__ import annotations
 
 import asyncio
@@ -15,10 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class DispatchedPostProcessor(BasePostProcessor):
-    """Auto-detecting post-processor that routes to YoloV9 or YoloV10 based on output shape.
-
-    Init args match YoloV10PostProcessor for drop-in replacement compatibility.
-    """
+    """Auto-detecting post-processor that routes to YoloV9 or YoloV10 based on output shape."""
 
     short_name = "Auto"
 
@@ -34,7 +29,6 @@ class DispatchedPostProcessor(BasePostProcessor):
 
     @property
     def active_short_name(self) -> str:
-        """Return the short name of the currently active post-processor."""
         return self._active_short_name
 
     async def process(
@@ -42,7 +36,6 @@ class DispatchedPostProcessor(BasePostProcessor):
         inference_output: list[np.ndarray],
         input_shape: tuple[int, int],
     ) -> np.ndarray:
-        """Auto-detect model type and delegate to appropriate post-processor."""
         return await asyncio.to_thread(
             self._process_sync, inference_output, input_shape
         )
@@ -106,9 +99,6 @@ class DispatchedPostProcessor(BasePostProcessor):
         - YoloV10: Shape (1, N, 6) or (N, 6) - last dimension is 6
         - YoloV9:  Shape (1, num_attrs, num_preds) where num_attrs >= 5 and != 6
         - Unknown: Cannot determine from shape
-
-        Args:
-            inference_output: List of raw output tensors from inference
 
         Returns:
             'yolov10', 'yolov9', or 'unknown'

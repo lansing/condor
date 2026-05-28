@@ -1,6 +1,6 @@
 """YOLOv10 post-processor.
 
-YOLOv10 models exported from Ultralytics output a single tensor of shape
+YOLOv10 models output a single tensor of shape
 ``(1, N, 6)`` where each detection row is:
     ``[x1, y1, x2, y2, confidence, class_id]``
 
@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 class YoloV10PostProcessor(BasePostProcessor):
-    """Post-processor for YOLOv10 ONNX models with ``(1, N, 6)`` output."""
-
     short_name = "V10"
 
     def __init__(
@@ -46,14 +44,9 @@ class YoloV10PostProcessor(BasePostProcessor):
         inference_output: list[np.ndarray],
         input_shape: tuple[int, int],
     ) -> np.ndarray:
-        """Async entry point — delegates CPU work to a thread-pool executor."""
         return await asyncio.to_thread(
             self._process_sync, inference_output, input_shape
         )
-
-    # ------------------------------------------------------------------
-    # Synchronous implementation (runs inside thread-pool executor)
-    # ------------------------------------------------------------------
 
     def _process_sync(
         self,
@@ -68,10 +61,8 @@ class YoloV10PostProcessor(BasePostProcessor):
 
         raw = inference_output[0]  # shape: (1, N, 6) or (N, 6)
 
-        # Normalise to float32 regardless of model output dtype (float16, etc.)
         raw = raw.astype(np.float32)
 
-        # Squeeze batch dimension if present
         if raw.ndim == 3:
             raw = raw[0]  # (N, 6)
 
@@ -84,7 +75,6 @@ class YoloV10PostProcessor(BasePostProcessor):
 
         input_h, input_w = input_shape
 
-        # Filter by confidence (column index 4)
         confidences = raw[:, 4]
         mask = confidences >= self.confidence_threshold
         filtered = raw[mask]
@@ -92,7 +82,6 @@ class YoloV10PostProcessor(BasePostProcessor):
         if filtered.shape[0] == 0:
             return result
 
-        # Sort by confidence descending and take top max_detections
         order = np.argsort(filtered[:, 4])[::-1][: self.max_detections]
         top = filtered[order]
 

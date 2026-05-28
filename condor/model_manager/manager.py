@@ -1,28 +1,3 @@
-"""Async model lifecycle manager.
-
-Responsibilities:
-  - Check whether a model file exists in the models directory.
-  - Save model bytes received from Frigate (async, via aiofiles).
-  - Load a model into the inference backend (async, with cleanup of the
-    previously loaded model to free VRAM / memory before loading the new one).
-  - Expose the active backend for inference calls.
-
-An asyncio.Lock guards all load/unload operations so that concurrent model
-management messages cannot corrupt state.
-
-Shared-resource protocol
-------------------------
-When a SharedStateRegistry is supplied (multi-worker mode), load_model()
-calls backend.load_shared_sync() via the registry — ensuring that expensive
-one-time work (engine deserialisation, model compilation) happens at most once
-regardless of how many workers race to load simultaneously.  The resulting
-SharedBackendState is passed to backend.load() so each worker can set up its
-own per-worker resources (execution context, infer request, I/O buffers).
-
-In single-worker mode (no registry), backend.load() receives shared=None and
-is responsible for doing everything itself.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -59,10 +34,6 @@ class AsyncModelManager:
         self._active_model: str | None = None
         self._lock = asyncio.Lock()
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
     @property
     def backend(self) -> BaseBackend | None:
         return self._backend
@@ -75,26 +46,16 @@ class AsyncModelManager:
     def model_info(self) -> ModelInfo | None:
         return self._backend.model_info if self._backend is not None else None
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _make_backend(self) -> BaseBackend:
         return TensorRTBackend()
 
     def _shared_key(self, model_path: str) -> str:
         return f"tensorrt:{model_path}"
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def model_exists(self, model_name: str) -> bool:
-        """Return True if *model_name* exists in the models directory."""
         return (self.models_dir / model_name).exists()
 
     async def save_model(self, model_name: str, data: bytes) -> bool:
-        """Write *data* to ``<models_dir>/<model_name>`` asynchronously."""
         self.models_dir.mkdir(parents=True, exist_ok=True)
         model_path = self.models_dir / model_name
         try:
@@ -107,17 +68,6 @@ class AsyncModelManager:
             return False
 
     async def lazy_load_from_registry(self) -> bool:
-        """Load per-worker resources from the shared registry cache without waiting
-        for Frigate to explicitly send a model-request to this worker.
-
-        In multi-worker mode Frigate addresses only one worker with the initial
-        model-request message.  All other workers must self-initialise on first
-        inference so they can serve requests immediately.  The expensive shared
-        work (engine deserialisation, etc.) is already cached; only the cheap
-        per-worker setup (execution context, I/O buffers) is repeated here.
-
-        Returns True if a model is now loaded (already was, or just finished).
-        """
         if self._backend is not None:
             return True
         if self._shared_registry is None:
@@ -138,16 +88,6 @@ class AsyncModelManager:
         return False
 
     async def auto_load_from_disk(self) -> bool:
-        """Load the first model file found in models_dir.
-
-        Called when Condor restarts while Frigate is still running: Frigate
-        already did the model-request handshake with the previous Condor
-        instance and will not repeat it, so inference requests arrive before
-        any model is explicitly loaded.  Scanning the models directory and
-        loading whatever is there recovers from this scenario automatically.
-
-        Returns True if a model is now loaded (already was, or just finished).
-        """
         if self._backend is not None:
             return True
 
@@ -176,15 +116,6 @@ class AsyncModelManager:
         return await self.load_model(model_name)
 
     async def load_model(self, model_name: str) -> bool:
-        """Load *model_name* into the backend, replacing any currently loaded model.
-
-        The lock ensures sequential load/unload even if multiple coroutines
-        race to load at the same time.
-
-        When a SharedStateRegistry is present, expensive one-time resources
-        (engine deserialisation, model compilation) are loaded via the registry
-        and reused across all workers.
-        """
         with tracer.start_as_current_span("condor.model.load") as load_span:
             load_span.set_attribute("model_name", model_name)
             load_span.set_attribute("provider", "tensorrt")
@@ -202,8 +133,6 @@ class AsyncModelManager:
                     tel.count_model_load(model_name=model_name, provider="tensorrt", status="error")
                     return False
 
-                # Cleanup the existing backend before loading the new model so that
-                # GPU/NPU memory is released first (requirement §3.3).
                 if self._backend is not None:
                     logger.info(
                         "Unloading current model (%s) before loading %s.",
@@ -221,12 +150,8 @@ class AsyncModelManager:
                     shared = None
 
                     if self._shared_registry is not None:
-                        # Load shared resources via the registry (at most once per
-                        # model across all workers; subsequent workers get cached state).
                         key = self._shared_key(str(model_path))
 
-                        # Probe whether a cache hit is likely (rough check; the
-                        # real serialised check is inside get_or_load under its lock).
                         cache_hit_before = self._shared_registry.contains(key)
 
                         with tracer.start_as_current_span("condor.shared_state.get_or_load") as ss_span:

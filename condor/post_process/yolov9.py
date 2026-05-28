@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 
 def xywh2xyxy_np(x: np.ndarray) -> np.ndarray:
-    """Convert bounding box from (x, y, w, h) to (x1, y1, x2, y2) format."""
     y = np.empty_like(x)
     xy = x[..., :2]
     wh_half = x[..., 2:] / 2
@@ -48,8 +47,6 @@ def xywh2xyxy_np(x: np.ndarray) -> np.ndarray:
 
 
 class YoloV9PostProcessor(BasePostProcessor):
-    """Post-processor for YOLOv9 ONNX models with yolo-generic output."""
-
     short_name = "V9"
 
     def __init__(
@@ -67,7 +64,6 @@ class YoloV9PostProcessor(BasePostProcessor):
         inference_output: list[np.ndarray],
         input_shape: tuple[int, int],
     ) -> np.ndarray:
-        """Async entry point - delegates CPU work to a thread-pool executor."""
         return await asyncio.to_thread(
             self._process_sync, inference_output, input_shape
         )

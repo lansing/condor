@@ -1,5 +1,3 @@
-"""Entry point for the Frigate remote detector server."""
-
 from __future__ import annotations
 
 import argparse
@@ -39,13 +37,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# Multi-worker coordination
-# ---------------------------------------------------------------------------
-
 class _WorkerCoordinator:
-    """Thread-safe registry that propagates shutdown to all worker event loops."""
-
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._stop_requested = False
@@ -56,16 +48,12 @@ class _WorkerCoordinator:
         loop: asyncio.AbstractEventLoop,
         task: asyncio.Task,
     ) -> None:
-        """Called from inside each worker thread once its asyncio task is running."""
         with self._lock:
             self._workers.append((loop, task))
-            # If shutdown was already requested before this worker registered,
-            # cancel it immediately.
             if self._stop_requested:
                 loop.call_soon_threadsafe(task.cancel)
 
     def shutdown_all(self) -> None:
-        """Cancel every registered worker task (thread-safe, callable from signal handler)."""
         with self._lock:
             self._stop_requested = True
             for loop, task in self._workers:
@@ -80,21 +68,6 @@ def _run_worker(
     shared_registry: SharedStateRegistry | None,
     infer_sem: threading.BoundedSemaphore | None,
 ) -> None:
-    """Target function for each worker thread.
-
-    Each thread runs its own asyncio event loop so workers are fully
-    concurrent.  The ZMQ REP socket inside each worker still maintains the
-    strict send→recv ordering Frigate requires, but workers on different ports
-    proceed independently.
-
-    *shared_registry* is shared across all workers; it ensures expensive
-    one-time backend initialisation (engine deserialisation, model compilation)
-    happens at most once.
-
-    *infer_sem* is a threading.BoundedSemaphore that limits concurrent hardware
-    inference calls across all workers.  None means unlimited.
-    """
-
     async def _main() -> None:
         handler = AsyncZMQHandler(
             config,
@@ -116,10 +89,6 @@ def _run_worker(
     asyncio.run(_main())
     logger.info("Worker %d stopped.", worker_idx)
 
-
-# ---------------------------------------------------------------------------
-# Single-worker (original) path
-# ---------------------------------------------------------------------------
 
 async def _run_single(config: AppConfig) -> None:
     handler = AsyncZMQHandler(config)
@@ -149,7 +118,6 @@ def _run_multi(config: AppConfig) -> None:
     num_workers = config.server.num_workers
     base_port = config.server.base_port
 
-    # Shared resources: one registry and one semaphore for all workers.
     shared_registry = SharedStateRegistry()
 
     max_concurrency = config.inference.max_inference_concurrency
@@ -193,15 +161,10 @@ def _run_multi(config: AppConfig) -> None:
         for t in threads:
             t.join()
     except KeyboardInterrupt:
-        # Fallback in case KeyboardInterrupt slips through despite the handler.
         coordinator.shutdown_all()
         for t in threads:
             t.join()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     args = _parse_args()
@@ -209,8 +172,6 @@ def main() -> None:
     _setup_logging(config.logging.level)
     setup_telemetry(config.observability)
 
-    # Configure and start the stats socket server (feeds the TUI).
-    # Always runs regardless of observability mode.
     tel.stats.configure(
         provider=config.inference.provider,
         num_workers=config.server.num_workers,

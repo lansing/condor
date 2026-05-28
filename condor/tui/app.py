@@ -1,16 +1,3 @@
-"""Condor metrics TUI — 90s BBS ANSI-art style.
-
-Connects to the stats Unix socket at /tmp/condor-metrics.sock and displays
-live metrics from the running Condor server.
-
-Usage:
-    condor-tui
-    uv run condor-tui
-
-Requires:
-    uv sync --extra tui
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -33,10 +20,6 @@ from .art import _trunc, _vis
 # bind-mounted from a running Docker container (see docker-compose.yaml).
 SOCKET_PATH = os.environ.get("CONDOR_STATS_SOCKET", _DEFAULT_SOCKET_PATH)
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-
 
 def _fmt_time(seconds: float) -> str:
     h = int(seconds // 3600)
@@ -45,11 +28,6 @@ def _fmt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-# ---------------------------------------------------------------------------
-# Stacked-bar sparkline — stage colours and helpers
-# ---------------------------------------------------------------------------
-
-# Easy to reconfigure: change a colour here and it applies everywhere.
 STAGE_COLORS: dict[str, str] = {
     "mcpy": "yellow",
     "h2d": "cyan",
@@ -58,7 +36,7 @@ STAGE_COLORS: dict[str, str] = {
     "d2h": "magenta",
     "pp": "green",
 }
-# Pipeline execution order — determines top-to-bottom stack order in the bar.
+
 STAGE_ORDER: list[str] = ["mcpy", "h2d", "swait", "exec", "d2h", "pp"]
 STAGE_LABELS: dict[str, str] = {
     "mcpy": "Host memory copy",
@@ -106,11 +84,6 @@ def _alloc_rows(vals: dict[str, float], bar_h: int) -> dict[str, int]:
 def _build_column(
     vals: dict[str, float], bar_h: int, e2e: float, peak: float
 ) -> list[str]:
-    """Return a list of *bar_h* colour strings (or '' for empty) for one bar column.
-
-    Row 0 = top, row bar_h-1 = bottom.  Bar height is scaled by e2e/peak
-    (bottom-aligned).  Within the bar, segments are proportional to stage shares.
-    """
     col: list[str] = [""] * bar_h
     if bar_h == 0:
         return col
@@ -120,19 +93,15 @@ def _build_column(
         col[bar_h - 1] = _BASELINE_COLOR
         return col
 
-    # Scale total bar height relative to peak (bottom-aligned)
     bar_total = max(1, min(bar_h, round(e2e / peak * bar_h)))
     start_row = bar_h - bar_total
 
     D = sum(vals.values())
     if D == 0:
-        # --- Fallback / future per-provider hook ---
-        # No stage data (non-TRT): single-colour E2E bar, height already scaled.
         for r in range(start_row, bar_h):
             col[r] = STAGE_COLORS["exec"]
         return col
 
-    # Full stacked mode: allocate bar_total rows proportionally, bottom-aligned.
     alloc = _alloc_rows(vals, bar_total)
     cur_row = start_row
     for stage in STAGE_ORDER:
@@ -168,7 +137,6 @@ def _render_bar_row(row: list[str]) -> str:
 
 
 def _fmt_ms_row(d: dict) -> str:
-    """Format an avg_p99 dict as a fixed-width string."""
     return f"{d['avg']:6.1f}  {d['p99']:6.1f}"
 
 
@@ -178,8 +146,6 @@ def _fmt_ms_row(d: dict) -> str:
 
 
 class StatusBanner(Static):
-    """Single-line status bar: connection state, uptime, workers, model."""
-
     DEFAULT_CSS = """
     StatusBanner {
         height: 3;
@@ -230,9 +196,9 @@ class StatusBanner(Static):
             )
         prefix = (
             f"[bold green]● ONLINE[/bold green]  "
-            f"⏱ [cyan]{_fmt_time(self._uptime)}[/cyan]  "
-            f"⚙ [yellow]{self._workers_active}/{self._num_workers} workers[/yellow]  "
-            f"📦 "
+            f"Up [cyan]{_fmt_time(self._uptime)}[/cyan]  "
+            f"[yellow]{self._num_workers} workers[/yellow]  "
+            f""
         )
         model_budget = self.size.width - _vis(prefix)
         model = _trunc(self._model, model_budget)
@@ -247,8 +213,6 @@ class StatusBanner(Static):
 
 
 class _LatencyBars(Static):
-    """Renders the title row and stacked bar chart (no summary line)."""
-
     DEFAULT_CSS = """
     _LatencyBars { width: 2fr; height: 1fr; }
     """
@@ -267,9 +231,6 @@ class _LatencyBars(Static):
         lat = self._lat_data
         stages = self._stages
 
-        # Widget.size is the content area (Textual excludes border and padding).
-        # bar_h: content_h - title(1)  [summary lives in a sibling Static]
-        # bar_w: content_w — matches _num_ticks = lat_panel.size.width in _update_ui
         bar_h = max(1, self.size.height - 1)
         bar_w = max(1, self.size.width)
 
@@ -279,13 +240,11 @@ class _LatencyBars(Static):
         if not lat:
             return title
 
-        # Align to rightmost n_cols ticks; left-pad to bar_w with baseline markers
         n_cols = min(bar_w, len(lat))
         offset = len(lat) - n_cols
         lat_slice = lat[offset:]
         n_blank = bar_w - n_cols
 
-        # Grid is always bar_w wide so rendered rows fill the content area exactly
         grid: list[list[str]] = [[""] * bar_w for _ in range(bar_h)]
         for col in range(n_blank):
             grid[bar_h - 1][col] = _BASELINE_COLOR
@@ -311,16 +270,6 @@ class _LatencyBars(Static):
 
 
 class StackedBarPanel(Widget):
-    """E2E latency sparkline rendered as a stacked pipeline-stage bar chart.
-
-    Each vertical bar represents one tick.  Its height segments show the
-    relative share of each pipeline stage (MCpy → H2D → SWait → Exec → D2H →
-    PostP) for that tick, using the colours in STAGE_COLORS.
-
-    When no stage data is available (non-TRT providers), falls back to a
-    single-colour E2E bar scaled to the peak value.
-    """
-
     DEFAULT_CSS = """
     StackedBarPanel {
         width: 1fr;
@@ -360,10 +309,6 @@ class StackedBarPanel(Widget):
         self.query_one(_LatencyBars).update(lat_data, stages)
         self.query_one(".summary", Static).update(summary)
 
-
-# ---------------------------------------------------------------------------
-# Sparkline panels
-# ---------------------------------------------------------------------------
 
 
 class GraphPanel(Widget):
@@ -412,7 +357,6 @@ class GraphPanel(Widget):
     def update_data(self, data: list[float], summary: str) -> None:
         if not data:
             return
-        # Show the current max value as a y-axis scale hint in the title
         peak = max(data)
         scale = f"{peak:.0f}"
         self.query_one(f"#{self._title_id}", Static).update(
@@ -420,11 +364,6 @@ class GraphPanel(Widget):
         )
         self.query_one(f"#{self._spark_id}", Sparkline).data = data
         self.query_one(f"#{self._summary_id}", Static).update(summary)
-
-
-# ---------------------------------------------------------------------------
-# Per-worker panel
-# ---------------------------------------------------------------------------
 
 
 class WorkerPanel(Static):
@@ -483,13 +422,8 @@ class WorkerPanel(Static):
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Global stats panel
-# ---------------------------------------------------------------------------
-
 
 class GlobalPanel(Static):
-    """Displays global metrics: concurrent inferences, TRT timing."""
 
     DEFAULT_CSS = """
     GlobalPanel {
@@ -544,8 +478,6 @@ class GlobalPanel(Static):
 
 
 class GpuPanel(Widget):
-    """Live GPU utilisation sparkline + power bar, styled like WorkerPanel."""
-
     DEFAULT_CSS = """
     GpuPanel {
         width: 1fr;
@@ -628,18 +560,7 @@ class GpuPanel(Widget):
         self.query_one(".gpu-power", Static).update(pwr_text)
 
 
-# ---------------------------------------------------------------------------
-# Legend modal
-# ---------------------------------------------------------------------------
-
-
 class LegendPanel(Widget):
-    """Color legend for the E2E latency stacked bar chart.
-
-    Occupies the right 1/3 of the latency panel area.  Hidden by default;
-    toggled with  l.
-    """
-
     DEFAULT_CSS = """
     LegendPanel {
         width: 1fr;
@@ -664,11 +585,6 @@ class LegendPanel(Widget):
             yield Static(
                 f"  [{color}]██[/{color}]  [{color}]{STAGE_ABBREV[stage]}[/{color}]"
             )
-
-
-# ---------------------------------------------------------------------------
-# Tick selector dialog
-# ---------------------------------------------------------------------------
 
 
 class TickSelectorScreen(ModalScreen):
@@ -739,10 +655,6 @@ class TickSelectorScreen(ModalScreen):
         self.dismiss(None)
 
 
-# ---------------------------------------------------------------------------
-# Custom footer
-# ---------------------------------------------------------------------------
-
 
 class AppFooter(Static):
     """Footer row: key hints + current tick rate."""
@@ -772,13 +684,8 @@ class AppFooter(Static):
         )
 
 
-# ---------------------------------------------------------------------------
-# Main application
-# ---------------------------------------------------------------------------
-
 
 class CondorTUI(App[None]):
-    """Condor metrics TUI."""
 
     TITLE = "CONDOR — Frigate Remote Detector"
 
@@ -833,23 +740,15 @@ class CondorTUI(App[None]):
         self._num_ticks: int = 60
         self._stats_writer: asyncio.StreamWriter | None = None
 
-    # ------------------------------------------------------------------
-    # Layout
-    # ------------------------------------------------------------------
-
     def compose(self) -> ComposeResult:
         yield StatusBanner()
         with Horizontal(id="graphs-row"):
             yield StackedBarPanel()
             yield GraphPanel("THROUGHPUT", "req/s", "throughput-panel")
         with Horizontal(id="workers-row"):
-            yield GlobalPanel()  # always visible on the left
-            yield GpuPanel()  # visible by default; workers mounted hidden on first snapshot
+            yield GlobalPanel()
+            yield GpuPanel()
         yield AppFooter()
-
-    # ------------------------------------------------------------------
-    # Stats reader worker
-    # ------------------------------------------------------------------
 
     @work(exclusive=True)
     async def _read_stats(self) -> None:
@@ -879,10 +778,6 @@ class CondorTUI(App[None]):
 
     def on_mount(self) -> None:
         self._read_stats()
-
-    # ------------------------------------------------------------------
-    # Tick config
-    # ------------------------------------------------------------------
 
     async def _send_time_config(self) -> None:
         """Push current window_s / sparkline_len config to the server."""
@@ -923,10 +818,6 @@ class CondorTUI(App[None]):
             self.query_one(AppFooter).seconds_per_tick = result
             await self._send_time_config()
 
-    # ------------------------------------------------------------------
-    # UI updates
-    # ------------------------------------------------------------------
-
     def _update_disconnected(self) -> None:
         try:
             self.query_one(StatusBanner).update_disconnected()
@@ -939,7 +830,6 @@ class CondorTUI(App[None]):
         num_workers = cfg.get("num_workers", 1)
         base_port = cfg.get("base_port", 5555)
 
-        # Update header status
         uptime = data.get("uptime_s", 0.0)
         workers_active = data.get("active_workers", 0)
         model_raw = data.get("active_model", "")
@@ -957,8 +847,6 @@ class CondorTUI(App[None]):
         # graph X-axis and metric rolling windows stay in sync.
         try:
             lat_panel = self.query_one("#latency-panel", StackedBarPanel)
-            # Widget.size in Textual is already the content area (border and
-            # padding excluded), so no adjustment needed.
             w = lat_panel.size.width
             if w > 0 and w != self._num_ticks:
                 self._num_ticks = w
@@ -966,8 +854,6 @@ class CondorTUI(App[None]):
         except Exception:
             pass
 
-        # Update sparklines — trim or left-pad to exactly _num_ticks points so
-        # the X-scale is always consistent regardless of uptime or window changes.
         n = self._num_ticks
         lat_data = list(data.get("sparkline_latency", []))
         tput_data = list(data.get("sparkline_throughput", []))
@@ -989,7 +875,6 @@ class CondorTUI(App[None]):
                 f"peak {max(lat_data):.1f}"
             )
 
-        # Extract and pad per-stage sparkline histories to n ticks
         stages_raw = data.get("sparkline_stages", {})
         stages: dict[str, list[float]] = {}
         for stage in STAGE_ORDER:
@@ -1016,15 +901,12 @@ class CondorTUI(App[None]):
             tput_data, tput_summary
         )
 
-        # Create worker panels on first snapshot (or if worker count changes)
         workers = data.get("workers", {})
         if not self._layout_ready or self._num_workers != num_workers:
             await self._create_worker_panels(num_workers, base_port)
             self._layout_ready = True
             self._num_workers = num_workers
 
-        # Update per-worker panels — pass full snapshot so workers can read
-        # global TRT timing (H2D etc.) which has no per-worker breakdown.
         for wid_str, wdata in workers.items():
             try:
                 wid = int(wid_str)
@@ -1033,13 +915,11 @@ class CondorTUI(App[None]):
             except Exception:
                 pass
 
-        # Update global panel
         try:
             self.query_one("#global-panel", GlobalPanel).update_data(data)
         except Exception:
             pass
 
-        # Update GPU panel
         gpu_data = data.get("gpu")
         if gpu_data:
             spark = list(gpu_data.get("sparkline", []))
@@ -1055,7 +935,6 @@ class CondorTUI(App[None]):
     async def _create_worker_panels(self, num_workers: int, base_port: int) -> None:
         """Mount worker panels into the workers-row container."""
         container = self.query_one("#workers-row", Horizontal)
-        # Remove old worker panels only; GlobalPanel and GpuPanel stay in place.
         for child in list(container.children):
             if isinstance(child, WorkerPanel):
                 await child.remove()
@@ -1066,11 +945,6 @@ class CondorTUI(App[None]):
             wp = WorkerPanel(i, base_port + i)
             wp.display = workers_visible
             await container.mount(wp, before=gpu_panel)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:

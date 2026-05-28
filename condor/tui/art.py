@@ -1,52 +1,9 @@
-"""ASCII art assets for the Condor TUI.
-
-All logos use Unicode box-drawing and block characters for a 90s BBS aesthetic.
-Every logo is exactly 6 lines tall to match the CONDOR header logo.
-"""
-
 from __future__ import annotations
 
 import random
 import re
 import unicodedata
 from typing import NamedTuple
-
-# ---------------------------------------------------------------------------
-# CONDOR block logo (6 lines)
-# ---------------------------------------------------------------------------
-
-CONDOR_LOGO = """\
- ██████╗ ██████╗ ███╗   ██╗██████╗  ██████╗ ██████╗
-██╔════╝██╔═══██╗████╗  ██║██╔══██╗██╔═══██╗██╔══██╗
-██║     ██║   ██║██╔██╗ ██║██║  ██║██║   ██║██████╔╝
-██║     ██║   ██║██║╚██╗██║██║  ██║██║   ██║██╔══██╗
-╚██████╗╚██████╔╝██║ ╚████║██████╔╝╚██████╔╝██║  ██║
- ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝"""
-
-# ---------------------------------------------------------------------------
-# Bird animation
-# ---------------------------------------------------------------------------
-
-class BirdFrame(NamedTuple):
-    """A single frame of the bird animation with wings."""
-    left_wing: str
-    body: str
-    right_wing: str
-
-
-# Bird frames for flapping animation
-BIRD_FRAMES = [
-    BirdFrame("╱", "◉", "╲"),  # wings up
-    BirdFrame("╱ ", "◉", " ╲"),  # wings spread
-    BirdFrame(" ╲", "◉", "╱ "),  # wings down
-    BirdFrame("╲ ", "◉", " ╱"),  # wings folding
-]
-
-
-def get_bird_frame(frame_index: int) -> str:
-    """Return the bird character for the given frame index."""
-    bird = BIRD_FRAMES[frame_index % len(BIRD_FRAMES)]
-    return f"{bird.left_wing}{bird.body}{bird.right_wing}"
 
 
 _MARKUP_TAG_RE = re.compile(r"\[/?[^\[\]]+\]")

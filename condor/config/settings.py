@@ -1,5 +1,3 @@
-"""Pydantic-validated configuration with YAML loader."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -32,9 +30,7 @@ class LoggingConfig(BaseModel):
 
 
 class ConsoleObservabilityConfig(BaseModel):
-    # Print a metric snapshot to stdout every N seconds (0 = disable).
-    metrics_interval_seconds: int = 30
-    # Also emit individual finished spans as JSON to stdout (very verbose).
+    metrics_interval_seconds: int = 30  # 0 = disable
     export_traces: bool = False
 
 
@@ -78,8 +74,6 @@ class AppConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce_none_sections(cls, data: Any) -> Any:
-        """Replace null/missing config sections with empty dicts so Pydantic
-        applies field defaults rather than raising a validation error."""
         if isinstance(data, dict):
             for key in ("server", "inference", "post_process", "logging", "observability"):
                 if data.get(key) is None:
@@ -88,8 +82,6 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: str = "config/config.yaml") -> AppConfig:
-    """Load config from *path* (YAML).  Returns all-defaults AppConfig if the
-    file does not exist."""
     config_path = Path(path)
     if config_path.exists():
         with config_path.open() as f:

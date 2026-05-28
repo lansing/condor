@@ -1,15 +1,3 @@
-"""In-process stats accumulator and Unix socket server for the TUI.
-
-StatsCollector maintains rolling windows of metric measurements and per-worker
-counters.  It is updated by the ``_Tel`` singleton on every metric call.
-
-StatsServer runs a background thread that accepts Unix socket connections and
-pushes a JSON snapshot to each connected client once per second.
-
-Protocol: persistent connection; server pushes one JSON line per second.
-Socket path: /tmp/condor-metrics.sock
-"""
-
 from __future__ import annotations
 
 import collections
@@ -30,14 +18,7 @@ _WINDOW_S = 5.0  # rolling window length for per-worker latency stats
 _SPARKLINE_LEN = 60  # sparkline history depth (one point per second)
 
 
-# ---------------------------------------------------------------------------
-# Rolling window
-# ---------------------------------------------------------------------------
-
-
 class _RollingWindow:
-    """Thread-safe deque of (monotonic_timestamp, value) pairs."""
-
     def __init__(self, window_s: float = _WINDOW_S) -> None:
         self._window_s = window_s
         self._data: collections.deque[tuple[float, float]] = collections.deque()
@@ -55,7 +36,6 @@ class _RollingWindow:
             self._data.popleft()
 
     def stats(self) -> dict[str, float] | None:
-        """Return {avg, min, max} or None if no data in the window."""
         now = time.monotonic()
         with self._lock:
             self._evict(now)
@@ -70,21 +50,18 @@ class _RollingWindow:
         }
 
     def rate(self) -> float:
-        """Events per second in the rolling window."""
         now = time.monotonic()
         with self._lock:
             self._evict(now)
             return len(self._data) / self._window_s
 
     def count_in_window(self, window_s: float) -> int:
-        """Count events in the most recent *window_s* seconds."""
         now = time.monotonic()
         cutoff = now - window_s
         with self._lock:
             return sum(1 for t, _ in self._data if t >= cutoff)
 
     def stats_for_window(self, window_s: float) -> dict[str, float] | None:
-        """Return {avg, min, max} for events in the most recent *window_s* seconds."""
         now = time.monotonic()
         cutoff = now - window_s
         with self._lock:
@@ -99,7 +76,6 @@ class _RollingWindow:
         }
 
     def avg_p99(self) -> dict[str, float]:
-        """Return {avg, p99} over the full rolling window. Returns zeros when no data."""
         now = time.monotonic()
         with self._lock:
             self._evict(now)
@@ -114,28 +90,11 @@ class _RollingWindow:
         return {"avg": avg, "p99": p99}
 
     def set_window(self, window_s: float) -> None:
-        """Change the rolling window duration. Old data outside the new window
-        will be evicted on the next stats() / rate() call."""
         with self._lock:
             self._window_s = window_s
 
 
-# ---------------------------------------------------------------------------
-# GPU poller (pynvml — optional; silently disabled if unavailable)
-# ---------------------------------------------------------------------------
-
-
 class GpuPoller:
-    """Background thread that polls NVML for GPU metrics every 200 ms.
-
-    Polls at 5 Hz so sub-second GPU bursts are captured.  Utilisation samples
-    are accumulated between sparkline ticks; ``consume_avg_util()`` drains the
-    buffer and returns the mean, giving a smoothed value per sparkline point.
-
-    Initialisation is attempted lazily so the server starts fine even when
-    pynvml is not installed or no GPU is present.  Call ``start()`` and check
-    the return value before using ``latest()`` / ``consume_avg_util()``.
-    """
 
     _POLL_INTERVAL = 0.2  # seconds between NVML queries
 
@@ -154,7 +113,6 @@ class GpuPoller:
         self._stop = threading.Event()
 
     def start(self) -> bool:
-        """Initialise NVML and start the polling thread.  Returns True on success."""
         try:
             import pynvml  # type: ignore[import-untyped]
 
@@ -206,17 +164,12 @@ class GpuPoller:
         self._stop.set()
 
     def consume_avg_util(self) -> float:
-        """Drain accumulated utilisation samples and return their mean.
-
-        Called once per sparkline tick.  Returns 0.0 if no samples are ready.
-        """
         with self._lock:
             samples = self._util_samples
             self._util_samples = []
         return sum(samples) / len(samples) if samples else 0.0
 
     def latest(self) -> dict | None:
-        """Return a snapshot dict or None if NVML is not available."""
         with self._lock:
             if not self._available:
                 return None
@@ -232,11 +185,6 @@ class GpuPoller:
             }
 
 
-# ---------------------------------------------------------------------------
-# Per-worker stats bucket
-# ---------------------------------------------------------------------------
-
-
 class _WorkerStats:
     def __init__(self, window_s: float = _WINDOW_S) -> None:
         self.requests_total = 0
@@ -246,54 +194,41 @@ class _WorkerStats:
         self.postprocess = _RollingWindow(window_s)
 
 
-# ---------------------------------------------------------------------------
-# Stats collector
-# ---------------------------------------------------------------------------
-
-
 class StatsCollector:
-    """Thread-safe accumulator for all Condor runtime metrics."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._start = time.monotonic()
 
-        # Global gauges
         self._workers_active = 0
         self._inference_concurrent = 0
         self._active_model = ""
         self._active_postprocessor = ""
 
-        # Config metadata (set once from main)
         self._provider = ""
         self._num_workers = 1
         self._base_port = 5555
 
-        # Per-worker buckets (created on first access)
         self._workers: dict[int, _WorkerStats] = {}
-        self._current_window_s: float = _WINDOW_S  # kept in sync by set_window_config
+        self._current_window_s: float = _WINDOW_S
 
-        # GPU poller (optional; None when pynvml unavailable or not yet configured)
         self._gpu_poller: GpuPoller | None = None
         self._sparkline_gpu_util: collections.deque[float] = collections.deque(
             maxlen=_SPARKLINE_LEN
         )
 
-        # Global timing windows (backend-level; no worker_id available)
         self._sem_wait = _RollingWindow()
         self._trt_host_copy = _RollingWindow()
         self._trt_h2d = _RollingWindow()
         self._trt_execute = _RollingWindow()
         self._trt_d2h = _RollingWindow()
 
-        # Sparkline history — appended once per tick by _maybe_update_sparklines
         self._sparkline_latency: collections.deque[float] = collections.deque(
             maxlen=_SPARKLINE_LEN
         )
         self._sparkline_throughput: collections.deque[float] = collections.deque(
             maxlen=_SPARKLINE_LEN
         )
-        # Per-pipeline-stage sparklines (parallel to _sparkline_latency)
         self._sparkline_mcpy: collections.deque[float] = collections.deque(
             maxlen=_SPARKLINE_LEN
         )
@@ -313,20 +248,14 @@ class StatsCollector:
             maxlen=_SPARKLINE_LEN
         )
         self._last_sparkline = 0.0
-        self._sparkline_tick_s = (
-            2.0  # seconds between sparkline points; updated by set_window_config
-        )
+        self._sparkline_tick_s = 2.0
         self._sparkline_lock = threading.Lock()
-
-    # --- helpers -----------------------------------------------------------
 
     def _get_worker(self, wid: int) -> _WorkerStats:
         with self._lock:
             if wid not in self._workers:
                 self._workers[wid] = _WorkerStats(self._current_window_s)
             return self._workers[wid]
-
-    # --- configuration -----------------------------------------------------
 
     def configure(self, provider: str, num_workers: int, base_port: int) -> None:
         with self._lock:
@@ -335,7 +264,6 @@ class StatsCollector:
             self._base_port = base_port
 
     def configure_gpu(self, device_index: int = 0) -> None:
-        """Start GPU polling for *device_index*.  No-op if pynvml is unavailable."""
         poller = GpuPoller(device_index)
         if poller.start():
             with self._lock:
@@ -356,8 +284,6 @@ class StatsCollector:
         with self._lock:
             self._active_postprocessor = postprocessor
 
-    # --- gauge updates -----------------------------------------------------
-
     def inc_workers_active(self) -> None:
         with self._lock:
             self._workers_active += 1
@@ -374,8 +300,6 @@ class StatsCollector:
         with self._lock:
             self._inference_concurrent = max(0, self._inference_concurrent - 1)
 
-    # --- per-worker counter updates ----------------------------------------
-
     def count_request(self, worker_id: int) -> None:
         w = self._get_worker(worker_id)
         with self._lock:
@@ -386,8 +310,6 @@ class StatsCollector:
         with self._lock:
             w.inference_total += 1
 
-    # --- per-worker latency updates ----------------------------------------
-
     def record_e2e(self, worker_id: int, ms: float) -> None:
         self._get_worker(worker_id).e2e.add(ms)
 
@@ -396,8 +318,6 @@ class StatsCollector:
 
     def record_postprocess(self, worker_id: int, ms: float) -> None:
         self._get_worker(worker_id).postprocess.add(ms)
-
-    # --- global latency updates --------------------------------------------
 
     def record_sem_wait(self, ms: float) -> None:
         self._sem_wait.add(ms)
@@ -414,14 +334,7 @@ class StatsCollector:
     def record_trt_d2h(self, ms: float) -> None:
         self._trt_d2h.add(ms)
 
-    # --- time config -------------------------------------------------------
-
     def set_window_config(self, window_s: float, sparkline_len: int) -> None:
-        """Update rolling window duration and sparkline depth for all metrics.
-
-        Called when the TUI changes the tick settings.  Old data outside the
-        new window expires naturally on the next stats() call.
-        """
         window_s = max(1.0, window_s)
         sparkline_len = max(10, sparkline_len)
 
@@ -466,8 +379,6 @@ class StatsCollector:
                 )
             self._sparkline_tick_s = window_s / sparkline_len
 
-    # --- sparkline ---------------------------------------------------------
-
     def _maybe_update_sparklines(self) -> None:
         now = time.monotonic()
         with self._sparkline_lock:
@@ -477,11 +388,9 @@ class StatsCollector:
                 return
             self._last_sparkline = now
 
-        # Gather worker data outside the main lock (rolling windows are self-locking)
         with self._lock:
             worker_refs = list(self._workers.values())
 
-        # Instantaneous measurements: count events that arrived in the last `elapsed` seconds.
         all_e2e: list[float] = []
         total_count = 0
         for w in worker_refs:
@@ -490,10 +399,8 @@ class StatsCollector:
                 all_e2e.append(s["avg"])
             total_count += w.e2e.count_in_window(elapsed)
 
-        # Instantaneous throughput = events in elapsed window / elapsed seconds
         instant_rps = round(total_count / elapsed, 2) if elapsed > 0 else 0.0
 
-        # Per-stage instantaneous values for this tick
         def _stage_avg(rw: _RollingWindow) -> float:
             s = rw.stats_for_window(elapsed)
             return round(s["avg"], 1) if s else 0.0
@@ -502,7 +409,6 @@ class StatsCollector:
         active_pp = [s["avg"] for s in pp_stats if s]
         pp_val = round(sum(active_pp) / len(active_pp), 1) if active_pp else 0.0
 
-        # Always append so sparklines scroll smoothly each tick
         if all_e2e:
             self._sparkline_latency.append(round(sum(all_e2e) / len(all_e2e), 1))
         else:
@@ -521,10 +427,7 @@ class StatsCollector:
         )
         self._sparkline_gpu_util.append(gpu_util)
 
-    # --- snapshot ----------------------------------------------------------
-
     def snapshot(self) -> dict[str, Any]:
-        """Return a JSON-serialisable snapshot for the TUI."""
         self._maybe_update_sparklines()
 
         now = time.monotonic()
@@ -552,7 +455,6 @@ class StatsCollector:
             uptime = now - self._start
 
         def _agg(stats_list: list[dict]) -> dict[str, float]:
-            """Aggregate avg_p99 dicts across workers; ignore workers with no data."""
             active = [s for s in stats_list if s["p99"] > 0]
             if not active:
                 return {"avg": 0.0, "p99": 0.0}
@@ -605,16 +507,7 @@ class StatsCollector:
         }
 
 
-# ---------------------------------------------------------------------------
-# Socket server
-# ---------------------------------------------------------------------------
-
-
 class StatsServer:
-    """Background thread that pushes JSON snapshots over a Unix domain socket.
-
-    Spawns one per-client thread for each connected TUI instance.
-    """
 
     def __init__(
         self,
@@ -699,7 +592,6 @@ class StatsServer:
                 pass
 
     def _apply_client_config(self, raw: str) -> None:
-        """Parse and apply JSON config messages received from the TUI."""
         for line in raw.splitlines():
             line = line.strip()
             if not line:
