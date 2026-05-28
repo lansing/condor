@@ -89,30 +89,6 @@ def _run_worker(
     logger.info("Worker %d stopped.", worker_idx)
 
 
-async def _run_single(config: AppConfig) -> None:
-    handler = AsyncZMQHandler(config)
-
-    loop = asyncio.get_running_loop()
-    current_task = asyncio.current_task()
-
-    def _signal_handler() -> None:
-        logger.info("Shutdown signal received.")
-        if current_task and not current_task.done():
-            current_task.cancel()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
-
-    try:
-        await handler.run()
-    except asyncio.CancelledError:
-        pass  # Normal shutdown path
-
-
-# ---------------------------------------------------------------------------
-# Multi-worker path
-# ---------------------------------------------------------------------------
-
 def _run_multi(config: AppConfig) -> None:
     num_workers = config.server.num_workers
     base_port = config.server.base_port
@@ -180,13 +156,7 @@ def main() -> None:
     stats_server = StatsServer(tel)
     stats_server.start()
 
-    if config.server.num_workers > 1:
-        _run_multi(config)
-    else:
-        try:
-            asyncio.run(_run_single(config))
-        except KeyboardInterrupt:
-            pass
+    _run_multi(config)
 
 
 if __name__ == "__main__":

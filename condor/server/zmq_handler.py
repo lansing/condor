@@ -32,13 +32,13 @@ class AsyncZMQHandler:
         self,
         config: AppConfig,
         *,
-        endpoint: str | None = None,
+        endpoint: str,
         shared_registry: SharedStateRegistry | None = None,
         infer_sem: threading.BoundedSemaphore | None = None,
         worker_id: int = 0,
     ) -> None:
         self.config = config
-        self._endpoint = endpoint or config.server.endpoint
+        self._endpoint = endpoint
         self._worker_id = worker_id
         self.manager = AsyncModelManager(
             models_dir=config.server.models_dir,

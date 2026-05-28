@@ -24,7 +24,7 @@ from condor.server.zmq_handler import AsyncZMQHandler, _zeros_response
 
 def make_config(**overrides) -> AppConfig:
     return AppConfig(
-        server=ServerConfig(endpoint="tcp://*:15555", models_dir="/tmp/test_models"),
+        server=ServerConfig(models_dir="/tmp/test_models"),
         inference=InferenceConfig(provider="cpu"),
         post_process=PostProcessConfig(confidence_threshold=0.4, max_detections=20),
         **overrides,
@@ -136,7 +136,7 @@ async def test_post_processor_handles_float16_input():
 def handler():
     """AsyncZMQHandler with mocked model manager and ZMQ socket."""
     cfg = make_config()
-    h = AsyncZMQHandler(cfg)
+    h = AsyncZMQHandler(cfg, endpoint="tcp://*:15555")
     return h
 
 
@@ -269,8 +269,8 @@ async def test_bad_header_returns_zeros(handler: AsyncZMQHandler):
 
 def test_config_defaults():
     cfg = AppConfig()
-    assert cfg.server.endpoint == "tcp://*:5555"
     assert cfg.server.models_dir == "./models"
+    assert cfg.server.base_port == 5555
     assert cfg.inference.provider == "cpu"
     assert cfg.post_process.confidence_threshold == pytest.approx(0.4)
     assert cfg.post_process.max_detections == 20
@@ -283,6 +283,6 @@ def test_config_none_sections_use_defaults():
     cfg = AppConfig.model_validate(
         {"server": None, "inference": None, "post_process": None, "logging": None}
     )
-    assert cfg.server.endpoint == "tcp://*:5555"
+    assert cfg.server.base_port == 5555
     assert cfg.inference.provider == "cpu"
     assert cfg.post_process.confidence_threshold == pytest.approx(0.4)

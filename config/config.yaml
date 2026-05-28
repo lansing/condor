@@ -2,8 +2,6 @@
 # Extended options are commented out with their default values shown.
 
 server:
-  # ZMQ REP socket endpoint. Used only when num_workers: 1 (default single-worker mode).
-  endpoint: "tcp://*:5555"
   # Directory where model files are stored and received from Frigate.
   models_dir: "./models"
   # Number of independent worker threads, each with its own ZMQ REP socket.

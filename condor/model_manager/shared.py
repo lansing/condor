@@ -30,15 +30,6 @@ class SharedStateRegistry:
                 logger.debug("SharedStateRegistry: reusing shared state for %r", key)
             return self._cache[key]
 
-    def contains(self, key: str) -> bool:
-        with self._lock:
-            return key in self._cache
-
     def cached_keys(self) -> list[str]:
         with self._lock:
             return list(self._cache.keys())
-
-    def invalidate(self, key: str) -> None:
-        with self._lock:
-            if self._cache.pop(key, None) is not None:
-                logger.debug("SharedStateRegistry: invalidated %r", key)

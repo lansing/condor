@@ -14,6 +14,8 @@ from .shared import SharedStateRegistry
 
 logger = logging.getLogger(__name__)
 
+_CURRENT_MODEL_FILE = "_CURRENT_MODEL"
+
 
 class AsyncModelManager:
     def __init__(
@@ -53,6 +55,19 @@ class AsyncModelManager:
     def model_exists(self, model_name: str) -> bool:
         return (self.models_dir / model_name).exists()
 
+    def _write_current_model(self, model_name: str) -> None:
+        try:
+            (self.models_dir / _CURRENT_MODEL_FILE).write_text(model_name)
+        except OSError:
+            logger.warning("Could not write %s", _CURRENT_MODEL_FILE)
+
+    def _read_current_model(self) -> str | None:
+        try:
+            name = (self.models_dir / _CURRENT_MODEL_FILE).read_text().strip()
+            return name or None
+        except OSError:
+            return None
+
     async def save_model(self, model_name: str, data: bytes) -> bool:
         self.models_dir.mkdir(parents=True, exist_ok=True)
         model_path = self.models_dir / model_name
@@ -88,6 +103,19 @@ class AsyncModelManager:
     async def auto_load_from_disk(self) -> bool:
         if self._backend is not None:
             return True
+
+        # Prefer the model that was active before the last restart.
+        saved = self._read_current_model()
+        if saved and (self.models_dir / saved).exists():
+            logger.info(
+                "Auto-loading last active model '%s' from disk after restart.", saved
+            )
+            if await self.load_model(saved):
+                return True
+            logger.warning(
+                "Failed to load last active model '%s'; falling back to first available.",
+                saved,
+            )
 
         _MODEL_SUFFIXES = {".engine", ".trt"}
         try:
@@ -154,6 +182,7 @@ class AsyncModelManager:
                 self._active_model = model_name
                 logger.info("Model loaded: %s  info=%s", model_name, backend.model_info)
                 tel.set_active_model(model_name)
+                self._write_current_model(model_name)
                 return True
             except Exception:
                 logger.exception("Failed to load model %s.", model_name)
