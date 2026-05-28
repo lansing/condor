@@ -2,8 +2,7 @@
         docker-build docker-rebuild \
         docker-run docker-shell docker-test \
         docker-build-tensorrt-build docker-run-tensorrt-build docker-shell-tensorrt-build \
-        install-observability-local install-observability-otlp \
-        install-tui run-tui tui-host tui-docker
+        install-tui tui run-tui tui-host tui-docker replay
 
 CONFIG ?= config/config.yaml
 
@@ -25,28 +24,25 @@ test:
 test-client:
 	uv run python scripts/test_client.py --config $(CONFIG)
 
-# ── Observability ───────────────────────────────────────────────────────────────
-
-# Lightweight local metrics: Prometheus scrape endpoint (no database needed).
-# After installing, set observability.mode: "prometheus" in config.yaml.
-install-observability-local:
-	uv sync --extra observability-local
-
-# Full OTLP export to HyperDX, Grafana Tempo, Jaeger, etc.
-# After installing, set observability.mode: "otlp" in config.yaml.
-install-observability-otlp:
-	uv sync --extra observability-otlp
-
 # ── Metrics TUI ─────────────────────────────────────────────────────────────────
 
 # Install Textual and register the condor-tui entry point.
 install-tui:
 	uv sync --extra tui
 
-# Launch the TUI against a locally-running server (native uv run).
+# Launch the TUI from source against a locally-running server.
 # Socket: /tmp/condor-metrics.sock  (default, override with CONDOR_STATS_SOCKET=...).
-run-tui:
+tui:
 	uv run condor-tui
+
+run-tui: tui
+
+# Replay recorded metrics to the local socket, then open the TUI.
+# Useful for development on machines without a GPU or live Condor instance.
+replay:
+	python scripts/metrics_replay.py &
+	sleep 0.3
+	uv run condor-tui; kill %1 2>/dev/null; true
 
 # Launch the TUI on the HOST, reading the socket exposed by docker compose
 # via the bind-mount at ./run/metrics.sock.  Requires: make install-tui.
