@@ -15,29 +15,30 @@ from textual.widgets import Sparkline, Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
 from .art import _trunc, _vis
+from .palette import STAGE_ORDER, Palette, available_palettes, load_palette
 
-# Allow override via env var so the host TUI can reach a socket that is
-# bind-mounted from a running Docker container (see docker-compose.yaml).
 SOCKET_PATH = os.environ.get("CONDOR_STATS_SOCKET", _DEFAULT_SOCKET_PATH)
+_THEME_FILE = Path(SOCKET_PATH).parent / "condor-theme"
 
 
-def _fmt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
+def _load_saved_theme(names: list[str]) -> tuple[int, Palette]:
+    """Return (index, palette) from the saved theme file, or Broica as default."""
+    try:
+        name = _THEME_FILE.read_text().strip()
+        if name in names:
+            return names.index(name), load_palette(name)
+    except OSError:
+        pass
+    idx = names.index("Broica") if "Broica" in names else 0
+    return idx, load_palette(names[idx])
 
 
-STAGE_COLORS: dict[str, str] = {
-    "mcpy": "yellow",
-    "h2d": "cyan",
-    "swait": "red",
-    "exec": "blue",
-    "d2h": "magenta",
-    "pp": "green",
-}
+def _save_theme(name: str) -> None:
+    try:
+        _THEME_FILE.write_text(name)
+    except OSError:
+        pass
 
-STAGE_ORDER: list[str] = ["mcpy", "h2d", "swait", "exec", "d2h", "pp"]
 STAGE_LABELS: dict[str, str] = {
     "mcpy": "Host memory copy",
     "h2d": "Host → Device (H2D)",
@@ -54,60 +55,68 @@ STAGE_ABBREV: dict[str, str] = {
     "d2h": "D2H",
     "pp": "PostP",
 }
+
 _BLOCK = "█"
 _BASELINE_CHAR = "▁"
 _BASELINE_COLOR = "_baseline"  # sentinel — not a real Rich colour
 
 
+def _fmt_time(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _fmt_ms_row(d: dict) -> str:
+    return f"{d['avg']:6.1f}  {d['p99']:6.1f}"
+
+
 def _alloc_rows(vals: dict[str, float], bar_h: int) -> dict[str, int]:
-    """Allocate *bar_h* rows to stages proportionally (descending-first greedy)."""
+    """Allocate bar_h rows to stages proportionally (descending-first greedy)."""
     D = sum(vals.values())
     if D == 0 or bar_h == 0:
         return {s: 0 for s in vals}
-
     sorted_stages = sorted(vals.items(), key=lambda x: x[1], reverse=True)
     rows: dict[str, int] = {s: 0 for s in vals}
     used = 0
     for stage, v in sorted_stages:
-        r = round(v / D * bar_h)
-        r = min(r, bar_h - used)
+        r = min(round(v / D * bar_h), bar_h - used)
         rows[stage] = r
         used += r
         if used >= bar_h:
             break
-    # Rounding shortfall → give remainder to largest stage
     if used < bar_h and sorted_stages:
         rows[sorted_stages[0][0]] += bar_h - used
     return rows
 
 
 def _build_column(
-    vals: dict[str, float], bar_h: int, e2e: float, peak: float
+    vals: dict[str, float],
+    bar_h: int,
+    e2e: float,
+    peak: float,
+    stage_colors: dict[str, str],
 ) -> list[str]:
     col: list[str] = [""] * bar_h
     if bar_h == 0:
         return col
-
-    # No data → baseline marker only
     if e2e <= 0 or peak <= 0:
         col[bar_h - 1] = _BASELINE_COLOR
         return col
-
     bar_total = max(1, min(bar_h, round(e2e / peak * bar_h)))
     start_row = bar_h - bar_total
-
     D = sum(vals.values())
     if D == 0:
         for r in range(start_row, bar_h):
-            col[r] = STAGE_COLORS["exec"]
+            col[r] = stage_colors["exec"]
         return col
-
     alloc = _alloc_rows(vals, bar_total)
     cur_row = start_row
     for stage in STAGE_ORDER:
         n = alloc.get(stage, 0)
         if n > 0:
-            color = STAGE_COLORS[stage]
+            color = stage_colors[stage]
             for r in range(cur_row, min(cur_row + n, bar_h)):
                 col[r] = color
             cur_row += n
@@ -115,7 +124,7 @@ def _build_column(
 
 
 def _render_bar_row(row: list[str]) -> str:
-    """Convert a list of colour strings to a Rich-markup line of block characters."""
+    """Convert a list of colour strings to a Rich-markup line of block chars."""
     if not row:
         return ""
     parts: list[str] = []
@@ -136,10 +145,6 @@ def _render_bar_row(row: list[str]) -> str:
     return "".join(parts)
 
 
-def _fmt_ms_row(d: dict) -> str:
-    return f"{d['avg']:6.1f}  {d['p99']:6.1f}"
-
-
 # ---------------------------------------------------------------------------
 # Status banner
 # ---------------------------------------------------------------------------
@@ -149,10 +154,10 @@ class StatusBanner(Static):
     DEFAULT_CSS = """
     StatusBanner {
         height: 3;
-        border: heavy $primary;
-        color: $primary;
+        border: heavy $condor-border;
+        color: $condor-text;
         content-align: left middle;
-        background: $background;
+        background: $condor-info-bg;
         padding: 0 1;
     }
     """
@@ -194,16 +199,20 @@ class StatusBanner(Static):
                 "[bold red]● DISCONNECTED[/bold red]  "
                 f"[dim]waiting for condor server at {SOCKET_PATH}…[/dim]"
             )
+        p = self.app.palette
+        c_online  = p.gradient_high
+        c_uptime  = p.stage_color("h2d")
+        c_workers = p.stage_color("exec")
+        c_pp      = p.stage_color("swait")
         prefix = (
-            f"[bold green]● ONLINE[/bold green]  "
-            f"Up [cyan]{_fmt_time(self._uptime)}[/cyan]  "
-            f"[yellow]{self._num_workers} workers[/yellow]  "
-            f""
+            f"[bold {c_online}]● ONLINE[/]  "
+            f"Up [{c_uptime}]{_fmt_time(self._uptime)}[/]  "
+            f"[{c_workers}]{self._num_workers} workers[/]  "
         )
         model_budget = self.size.width - _vis(prefix)
         model = _trunc(self._model, model_budget)
         if self._postprocessor:
-            return f"{prefix}[white]{model}[/white] ([magenta]{self._postprocessor}[/magenta])"
+            return f"{prefix}[white]{model}[/white] ([{c_pp}]{self._postprocessor}[/])"
         return f"{prefix}[white]{model}[/white]"
 
 
@@ -233,13 +242,16 @@ class _LatencyBars(Static):
 
         bar_h = max(1, self.size.height - 1)
         bar_w = max(1, self.size.width)
-
         peak = max(lat) if lat else 0.0
-        title = f" ▶ E2E LATENCY  [yellow]↑ {peak:.0f}[/yellow]"
+
+        p = self.app.palette
+        gh = p.gradient_high
+        title = f" [bold white]▶ E2E LATENCY[/]  [{gh}]↑ {peak:.0f}[/]"
 
         if not lat:
             return title
 
+        stage_colors = p.stage_color_map()
         n_cols = min(bar_w, len(lat))
         offset = len(lat) - n_cols
         lat_slice = lat[offset:]
@@ -259,7 +271,7 @@ class _LatencyBars(Static):
                 )
                 for stage in STAGE_ORDER
             }
-            col_colors = _build_column(vals, bar_h, lat_slice[col_idx], peak)
+            col_colors = _build_column(vals, bar_h, lat_slice[col_idx], peak, stage_colors)
             for row in range(bar_h):
                 grid[row][col] = col_colors[row]
 
@@ -274,17 +286,17 @@ class StackedBarPanel(Widget):
     StackedBarPanel {
         width: 1fr;
         height: 1fr;
-        border: heavy $success;
+        border: heavy $condor-border;
         padding: 0 1;
-        background: $background;
-        color: $success;
+        background: $condor-bg;
+        color: $condor-text;
     }
     StackedBarPanel > Horizontal {
         height: 1fr;
     }
     StackedBarPanel > .summary {
         height: 1;
-        color: $text-muted;
+        color: $condor-text-muted;
     }
     """
 
@@ -310,20 +322,19 @@ class StackedBarPanel(Widget):
         self.query_one(".summary", Static).update(summary)
 
 
-
 class GraphPanel(Widget):
     """Labeled sparkline panel with a live max y-scale label."""
 
     DEFAULT_CSS = """
     GraphPanel {
         height: 1fr;
-        border: heavy $accent;
+        border: heavy $condor-border;
         padding: 0 1;
-        background: $background;
+        background: $condor-bg;
     }
     GraphPanel > .title {
         height: 1;
-        color: $accent;
+        color: $condor-text;
         text-style: bold;
     }
     GraphPanel > Sparkline {
@@ -331,13 +342,13 @@ class GraphPanel(Widget):
     }
     GraphPanel > .summary {
         height: 1;
-        color: $text-muted;
+        color: $condor-text-muted;
     }
     #throughput-panel-spark > .sparkline--max-color {
-        color: $accent;
+        color: $condor-grad-high;
     }
     #throughput-panel-spark > .sparkline--min-color {
-        color: $accent 30%;
+        color: $condor-grad-low;
     }
     """
 
@@ -358,9 +369,9 @@ class GraphPanel(Widget):
         if not data:
             return
         peak = max(data)
-        scale = f"{peak:.0f}"
+        gh = self.app.palette.gradient_high
         self.query_one(f"#{self._title_id}", Static).update(
-            f" ▶ {self._title}  [dim]↑ {scale}[/dim]"
+            f" [bold white]▶ {self._title}[/]  [{gh}]↑ {peak:.0f}[/]"
         )
         self.query_one(f"#{self._spark_id}", Sparkline).data = data
         self.query_one(f"#{self._summary_id}", Static).update(summary)
@@ -373,10 +384,10 @@ class WorkerPanel(Static):
     WorkerPanel {
         width: 1fr;
         height: 100%;
-        border: double $success;
+        border: double $condor-border;
         padding: 0 1;
-        background: $background;
-        color: $text;
+        background: $condor-bg;
+        color: $condor-text;
     }
     """
 
@@ -397,6 +408,7 @@ class WorkerPanel(Static):
     def render(self) -> str:  # type: ignore[override]
         d = self._data
         g = self._trt_data
+        p = self.app.palette
 
         inf = d.get("inference_total", 0)
         rps = d.get("req_per_sec", 0.0)
@@ -408,19 +420,21 @@ class WorkerPanel(Static):
         d2h = g.get("global_trt_d2h_ms", self._ZERO)
         pp = d.get("postprocess_ms", self._ZERO)
 
+        gh = p.gradient_high
+        mc, h2, sw, ex, d2, pp_ = (p.stage_color(s) for s in STAGE_ORDER)
         lines = [
-            f"[bold cyan]WORKER {self._worker_id}[/bold cyan]  [dim]:{self._port}[/dim]  [yellow]{rps:5.1f}/s [/yellow] [green]{inf:>7,}[/green]",
+            f"[bold white]WORKER {self._worker_id}[/]  [dim]:{self._port}[/dim]"
+            f"  [{gh}]{rps:5.1f}/s[/]  [white]{inf:>7,}[/white]",
             "  [dim]         avg     p99[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
-            f"  [yellow]MCpy[/yellow]  [white]{_fmt_ms_row(mcpy)}[/white] ms",
-            f"  [cyan]H2D[/cyan]   [white]{_fmt_ms_row(h2d)}[/white] ms",
-            f"  [red]SWait[/red] [white]{_fmt_ms_row(sem)}[/white] ms",
-            f"  [blue]Exec[/blue]  [white]{_fmt_ms_row(infer)}[/white] ms",
-            f"  [magenta]D2H[/magenta]   [white]{_fmt_ms_row(d2h)}[/white] ms",
-            f"  [green]PostP[/green] [white]{_fmt_ms_row(pp)}[/white] ms",
+            f"  [{mc}]MCpy[/{mc}]  [white]{_fmt_ms_row(mcpy)}[/white] ms",
+            f"  [{h2}]H2D[/{h2}]   [white]{_fmt_ms_row(h2d)}[/white] ms",
+            f"  [{sw}]SWait[/{sw}] [white]{_fmt_ms_row(sem)}[/white] ms",
+            f"  [{ex}]Exec[/{ex}]  [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  [{d2}]D2H[/{d2}]   [white]{_fmt_ms_row(d2h)}[/white] ms",
+            f"  [{pp_}]PostP[/{pp_}] [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
         return "\n".join(lines)
-
 
 
 class GlobalPanel(Static):
@@ -429,10 +443,10 @@ class GlobalPanel(Static):
     GlobalPanel {
         width: 1fr;
         height: 100%;
-        border: double $warning;
+        border: double $condor-border;
         padding: 0 1;
-        background: $background;
-        color: $text;
+        background: $condor-bg;
+        color: $condor-text;
     }
     """
 
@@ -448,6 +462,8 @@ class GlobalPanel(Static):
 
     def render(self) -> str:  # type: ignore[override]
         d = self._data
+        p = self.app.palette
+
         rps = d.get("global_throughput_rps", 0.0)
         e2e = d.get("global_e2e_ms", self._ZERO)
         mcpy = d.get("global_trt_host_copy_ms", self._ZERO)
@@ -457,18 +473,19 @@ class GlobalPanel(Static):
         d2h = d.get("global_trt_d2h_ms", self._ZERO)
         pp = d.get("global_postprocess_ms", self._ZERO)
 
+        gh = p.gradient_high
+        mc, h2, sw, ex, d2, pp_ = (p.stage_color(s) for s in STAGE_ORDER)
         lines = [
-            f"[bold yellow]GLOBAL METRICS[/bold yellow]  [green]{rps:7.2f} rps[/green]",
+            f"[bold white]STAGE LATENCY[/]  [{gh}]{rps:7.2f} rps[/]",
             "  [dim]         avg     p99[/dim]",
             f"  E2E   [white]{_fmt_ms_row(e2e)}[/white] ms",
-            f"  [yellow]MCpy[/yellow]  [white]{_fmt_ms_row(mcpy)}[/white] ms",
-            f"  [cyan]H2D[/cyan]   [white]{_fmt_ms_row(h2d)}[/white] ms",
-            f"  [red]SWait[/red] [white]{_fmt_ms_row(sem)}[/white] ms",
-            f"  [blue]Exec[/blue]  [white]{_fmt_ms_row(infer)}[/white] ms",
-            f"  [magenta]D2H[/magenta]   [white]{_fmt_ms_row(d2h)}[/white] ms",
-            f"  [green]PostP[/green] [white]{_fmt_ms_row(pp)}[/white] ms",
+            f"  [{mc}]MCpy[/{mc}]  [white]{_fmt_ms_row(mcpy)}[/white] ms",
+            f"  [{h2}]H2D[/{h2}]   [white]{_fmt_ms_row(h2d)}[/white] ms",
+            f"  [{sw}]SWait[/{sw}] [white]{_fmt_ms_row(sem)}[/white] ms",
+            f"  [{ex}]Exec[/{ex}]  [white]{_fmt_ms_row(infer)}[/white] ms",
+            f"  [{d2}]D2H[/{d2}]   [white]{_fmt_ms_row(d2h)}[/white] ms",
+            f"  [{pp_}]PostP[/{pp_}] [white]{_fmt_ms_row(pp)}[/white] ms",
         ]
-
         return "\n".join(lines)
 
 
@@ -482,14 +499,14 @@ class GpuPanel(Widget):
     GpuPanel {
         width: 1fr;
         height: 100%;
-        border: double $warning;
+        border: double $condor-border;
         padding: 0 1;
-        background: $background;
-        color: $text;
+        background: $condor-bg;
+        color: $condor-text;
     }
     GpuPanel > .gpu-header {
         height: 1;
-        color: $warning;
+        color: $condor-text;
         text-style: bold;
     }
     GpuPanel > #gpu-spark {
@@ -497,17 +514,17 @@ class GpuPanel(Widget):
     }
     GpuPanel > .gpu-summary {
         height: 1;
-        color: $text-muted;
+        color: $condor-text-muted;
     }
     GpuPanel > .gpu-power {
         height: 1;
-        color: $text-muted;
+        color: $condor-text-muted;
     }
     #gpu-spark > .sparkline--max-color {
-        color: $warning;
+        color: $condor-grad-high;
     }
     #gpu-spark > .sparkline--min-color {
-        color: $success;
+        color: $condor-grad-low;
     }
     """
 
@@ -528,63 +545,61 @@ class GpuPanel(Widget):
         mem_total_mb = gpu.get("mem_total_mb", 0.0)
         sparkline_data = gpu.get("sparkline", [])
 
+        p = self.app.palette
+        temp_color = p.gradient_color((temp_c - 30) / 50.0)  # 30°C=low, 80°C=high
         self.query_one(".gpu-header", Static).update(
-            f"[bold]GPU {index}[/bold]  [dim]{name}[/dim]  [yellow]{temp_c}°C[/yellow]"
+            f"[bold white]GPU {index}[/]  [dim]{name}[/dim]  [{temp_color}]{temp_c}°C[/]"
         )
         self.query_one("#gpu-spark", Sparkline).data = sparkline_data
 
         nonzero = [v for v in sparkline_data if v > 0]
-        if nonzero:
-            summary = (
-                f"  now {util_pct:.0f}%  "
-                f"avg {sum(nonzero) / len(nonzero):.0f}%  "
-                f"peak {max(sparkline_data):.0f}%"
-            )
-        else:
-            summary = ""
+        summary = (
+            f"  now {util_pct:.0f}%  "
+            f"avg {sum(nonzero) / len(nonzero):.0f}%  "
+            f"peak {max(sparkline_data):.0f}%"
+            if nonzero
+            else ""
+        )
         self.query_one(".gpu-summary", Static).update(summary)
 
         if power_limit_w > 0:
             pct = min(1.0, power_w / power_limit_w)
+            pwr_color = p.gradient_color(pct)
             bar_w = 10
             filled = round(pct * bar_w)
             bar = "█" * filled + "░" * (bar_w - filled)
-            color = "red" if pct >= 0.9 else "yellow"
             mem_gb = f"{mem_used_mb / 1024:.1f}/{mem_total_mb / 1024:.1f}GB"
             pwr_text = (
-                f"  Pwr [{color}]{power_w:.0f}W[/{color}]/{power_limit_w:.0f}W "
-                f"[{color}]{bar}[/{color}]  Mem {mem_gb}"
+                f"  Pwr [{pwr_color}]{power_w:.0f}W[/]/{power_limit_w:.0f}W "
+                f"[{pwr_color}]{bar}[/]  Mem {mem_gb}"
             )
         else:
             pwr_text = f"  Pwr {power_w:.0f}W"
         self.query_one(".gpu-power", Static).update(pwr_text)
 
 
-class LegendPanel(Widget):
+class LegendPanel(Static):
     DEFAULT_CSS = """
     LegendPanel {
         width: 1fr;
         height: 1fr;
-        border-left: heavy $success;
+        border-left: heavy $condor-border;
         padding: 0 1;
-        background: $background;
+        background: $condor-bg;
         display: none;
-    }
-    LegendPanel > .lp-title {
-        height: 1;
-        color: $success;
-        text-style: bold;
     }
     """
 
-    def compose(self) -> ComposeResult:
-        yield Static(" ▶ STAGE LEGEND", classes="lp-title")
-        yield Static("")
+    def render(self) -> str:  # type: ignore[override]
+        p = self.app.palette
+        gh = p.gradient_high
+        lines = [f"[bold {gh}] ▶ STAGE LEGEND[/]", ""]
         for stage in STAGE_ORDER:
-            color = STAGE_COLORS[stage]
-            yield Static(
+            color = p.stage_color(stage)
+            lines.append(
                 f"  [{color}]██[/{color}]  [{color}]{STAGE_ABBREV[stage]}[/{color}]"
             )
+        return "\n".join(lines)
 
 
 class TickSelectorScreen(ModalScreen):
@@ -597,20 +612,20 @@ class TickSelectorScreen(ModalScreen):
     #tick-dialog {
         width: 44;
         height: auto;
-        border: heavy $accent;
-        background: $surface;
+        border: heavy $condor-border;
+        background: $condor-panel-bg;
         padding: 1 2;
     }
     .dlg-title {
         text-style: bold;
-        color: $accent;
+        color: $condor-grad-high;
         padding-bottom: 1;
     }
     .dlg-opt {
-        color: $text;
+        color: $condor-text;
     }
     .dlg-hint {
-        color: $text-muted;
+        color: $condor-text-muted;
         padding-top: 1;
     }
     """
@@ -655,7 +670,6 @@ class TickSelectorScreen(ModalScreen):
         self.dismiss(None)
 
 
-
 class AppFooter(Static):
     """Footer row: key hints + current tick rate."""
 
@@ -663,8 +677,8 @@ class AppFooter(Static):
     AppFooter {
         height: 1;
         dock: bottom;
-        background: #111111;
-        color: $text-muted;
+        background: $condor-bg;
+        color: $condor-text-muted;
         padding: 0 1;
     }
     """
@@ -673,16 +687,18 @@ class AppFooter(Static):
     workers_visible: reactive[bool] = reactive(False)
 
     def render(self) -> str:
+        p = self.app.palette
+        gh = p.gradient_high
         spt = self.seconds_per_tick
         w_label = "GPU" if self.workers_visible else "Workers"
         return (
-            f"[bold white]q[/bold white] Quit  "
-            f"[bold white]t[/bold white] Tick  "
-            f"[bold white]l[/bold white] Legend  "
-            f"[bold white]w[/bold white] {w_label}  "
-            f"[dim cyan]{spt}s/tick[/dim cyan]"
+            f"[bold {gh}]q[/] Quit  "
+            f"[bold {gh}]t[/] Tick  "
+            f"[bold {gh}]l[/] Legend  "
+            f"[bold {gh}]w[/] {w_label}  "
+            f"[bold {gh}]m[/]/[bold {gh}]n[/] Theme [{p.text_muted}]{p.name}[/]  "
+            f"[{p.text_muted}]{spt}s/tick[/]"
         )
-
 
 
 class CondorTUI(App[None]):
@@ -691,7 +707,7 @@ class CondorTUI(App[None]):
 
     CSS = """
     Screen {
-        background: #0d0d0d;
+        background: $condor-bg;
         layers: base;
     }
 
@@ -704,22 +720,9 @@ class CondorTUI(App[None]):
         height: 1fr;
     }
 
-    #graphs-row #throughput-panel {
-        border: heavy $accent;
-    }
-
-    #graphs-row #throughput-panel > .title {
-        color: $accent;
-    }
-
     #workers-row {
         height: 11;
         layout: horizontal;
-    }
-
-    Footer {
-        background: #111111;
-        color: $text-muted;
     }
     """
 
@@ -729,9 +732,13 @@ class CondorTUI(App[None]):
         ("t", "set_tick", "Set Tick"),
         ("l", "legend", "Legend"),
         ("w", "workers", "Workers"),
+        ("m", "prev_theme", "Prev Theme"),
+        ("n", "next_theme", "Next Theme"),
     ]
 
     def __init__(self) -> None:
+        self._palette_names: list[str] = available_palettes()
+        self._palette_idx, self._palette = _load_saved_theme(self._palette_names)
         super().__init__()
         self._snapshot: dict = {}
         self._layout_ready = False
@@ -739,6 +746,34 @@ class CondorTUI(App[None]):
         self._seconds_per_tick: int = 2
         self._num_ticks: int = 60
         self._stats_writer: asyncio.StreamWriter | None = None
+
+    @property
+    def palette(self) -> Palette:
+        return self._palette
+
+    def set_palette(self, palette: Palette) -> None:
+        """Swap the active color palette and refresh all CSS and widgets."""
+        self._palette = palette
+        self.refresh_css()
+        for widget in self.query("*"):
+            widget.refresh()
+
+    def action_prev_theme(self) -> None:
+        self._palette_idx = (self._palette_idx - 1) % len(self._palette_names)
+        name = self._palette_names[self._palette_idx]
+        self.set_palette(load_palette(name))
+        _save_theme(name)
+
+    def action_next_theme(self) -> None:
+        self._palette_idx = (self._palette_idx + 1) % len(self._palette_names)
+        name = self._palette_names[self._palette_idx]
+        self.set_palette(load_palette(name))
+        _save_theme(name)
+
+    def get_css_variables(self) -> dict[str, str]:
+        base = super().get_css_variables()
+        base.update(self._palette.css_variables())
+        return base
 
     def compose(self) -> ComposeResult:
         yield StatusBanner()
@@ -752,12 +787,10 @@ class CondorTUI(App[None]):
 
     @work(exclusive=True)
     async def _read_stats(self) -> None:
-        """Async worker: connects to the stats socket and reads snapshots."""
         while True:
             try:
                 reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
                 self._stats_writer = writer
-                # Tell the server about our current time config immediately.
                 await self._send_time_config()
                 async for line in reader:
                     text = line.decode(errors="replace").strip()
@@ -780,14 +813,11 @@ class CondorTUI(App[None]):
         self._read_stats()
 
     async def _send_time_config(self) -> None:
-        """Push current window_s / sparkline_len config to the server."""
         w = self._stats_writer
         if w is None or w.is_closing():
             return
         window_s = self._num_ticks * self._seconds_per_tick
-        msg = (
-            json.dumps({"window_s": window_s, "sparkline_len": self._num_ticks}) + "\n"
-        )
+        msg = json.dumps({"window_s": window_s, "sparkline_len": self._num_ticks}) + "\n"
         try:
             w.write(msg.encode())
             await w.drain()
@@ -795,7 +825,6 @@ class CondorTUI(App[None]):
             pass
 
     def action_set_tick(self) -> None:
-        # push_screen_wait requires a worker context — delegate immediately.
         self._open_tick_dialog()
 
     def action_legend(self) -> None:
@@ -804,7 +833,7 @@ class CondorTUI(App[None]):
 
     def action_workers(self) -> None:
         gpu_panel = self.query_one(GpuPanel)
-        show_workers = gpu_panel.display  # if GPU is visible, switch to workers
+        show_workers = gpu_panel.display
         gpu_panel.display = not show_workers
         for wp in self.query(WorkerPanel):
             wp.display = show_workers
@@ -843,8 +872,6 @@ class CondorTUI(App[None]):
             data.get("active_postprocessor", ""),
         )
 
-        # Derive num_ticks from the latency panel's content width so the
-        # graph X-axis and metric rolling windows stay in sync.
         try:
             lat_panel = self.query_one("#latency-panel", StackedBarPanel)
             w = lat_panel.size.width
@@ -897,9 +924,7 @@ class CondorTUI(App[None]):
                 f"avg {sum(nonzero) / len(nonzero):.1f}  "
                 f"peak {max(tput_data):.1f}"
             )
-        self.query_one("#throughput-panel", GraphPanel).update_data(
-            tput_data, tput_summary
-        )
+        self.query_one("#throughput-panel", GraphPanel).update_data(tput_data, tput_summary)
 
         workers = data.get("workers", {})
         if not self._layout_ready or self._num_workers != num_workers:
@@ -933,12 +958,10 @@ class CondorTUI(App[None]):
                 pass
 
     async def _create_worker_panels(self, num_workers: int, base_port: int) -> None:
-        """Mount worker panels into the workers-row container."""
         container = self.query_one("#workers-row", Horizontal)
         for child in list(container.children):
             if isinstance(child, WorkerPanel):
                 await child.remove()
-
         workers_visible = self.query_one(AppFooter).workers_visible
         gpu_panel = self.query_one(GpuPanel)
         for i in range(num_workers):

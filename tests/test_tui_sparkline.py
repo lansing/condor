@@ -20,6 +20,7 @@ textual = pytest.importorskip("textual", reason="textual not installed (uv sync 
 from textual.app import App, ComposeResult  # noqa: E402
 
 from condor.tui.app import StackedBarPanel, _LatencyBars  # noqa: E402
+from condor.tui.palette import load_palette  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Minimal host app — StackedBarPanel fills the entire terminal.
@@ -30,6 +31,19 @@ TERM_H = 12
 
 
 class _SparkApp(App):
+    def __init__(self) -> None:
+        self._palette = load_palette()
+        super().__init__()
+
+    @property
+    def palette(self):
+        return self._palette
+
+    def get_css_variables(self) -> dict[str, str]:
+        base = super().get_css_variables()
+        base.update(self._palette.css_variables())
+        return base
+
     def compose(self) -> ComposeResult:
         yield StackedBarPanel()
 
