@@ -15,7 +15,14 @@ logger = logging.getLogger(__name__)
 # and the socket directory is bind-mounted to the host.
 SOCKET_PATH = os.environ.get("CONDOR_STATS_SOCKET", "/tmp/condor-metrics.sock")
 _WINDOW_S = 5.0  # rolling window length for per-worker latency stats
-_SPARKLINE_LEN = 60  # sparkline history depth (one point per second)
+_SPARKLINE_LEN = 200  # sparkline history depth at 2 s/tick ≈ 6.7 min
+_SPARKLINE_TICK_S = 2.0  # fixed tick interval — one sparkline point every 2 seconds
+
+
+def _pad(dq: collections.deque) -> list[float]:
+    """Zero-pad to maxlen so the TUI always receives a full-length array."""
+    deficit = (dq.maxlen or 0) - len(dq)
+    return [0.0] * deficit + list(dq)
 
 
 class _RollingWindow:
@@ -248,7 +255,6 @@ class StatsCollector:
             maxlen=_SPARKLINE_LEN
         )
         self._last_sparkline = 0.0
-        self._sparkline_tick_s = 2.0
         self._sparkline_lock = threading.Lock()
 
     def _get_worker(self, wid: int) -> _WorkerStats:
@@ -334,57 +340,11 @@ class StatsCollector:
     def record_trt_d2h(self, ms: float) -> None:
         self._trt_d2h.add(ms)
 
-    def set_window_config(self, window_s: float, sparkline_len: int) -> None:
-        window_s = max(1.0, window_s)
-        sparkline_len = max(10, sparkline_len)
-
-        with self._lock:
-            self._current_window_s = window_s
-            for w in self._workers.values():
-                w.e2e.set_window(window_s)
-                w.infer.set_window(window_s)
-                w.postprocess.set_window(window_s)
-            for rw in (
-                self._sem_wait,
-                self._trt_host_copy,
-                self._trt_h2d,
-                self._trt_execute,
-                self._trt_d2h,
-            ):
-                rw.set_window(window_s)
-
-        with self._sparkline_lock:
-            old_lat = list(self._sparkline_latency)
-            old_tput = list(self._sparkline_throughput)
-            self._sparkline_latency = collections.deque(
-                old_lat[-sparkline_len:], maxlen=sparkline_len
-            )
-            self._sparkline_throughput = collections.deque(
-                old_tput[-sparkline_len:], maxlen=sparkline_len
-            )
-            for attr in (
-                "_sparkline_mcpy",
-                "_sparkline_h2d",
-                "_sparkline_swait",
-                "_sparkline_exec",
-                "_sparkline_d2h",
-                "_sparkline_pp",
-                "_sparkline_gpu_util",
-            ):
-                old = list(getattr(self, attr))
-                setattr(
-                    self,
-                    attr,
-                    collections.deque(old[-sparkline_len:], maxlen=sparkline_len),
-                )
-            self._sparkline_tick_s = window_s / sparkline_len
 
     def _maybe_update_sparklines(self) -> None:
         now = time.monotonic()
         with self._sparkline_lock:
-            tick_s = self._sparkline_tick_s
-            elapsed = now - self._last_sparkline
-            if elapsed < tick_s:
+            if now - self._last_sparkline < 2.0:
                 return
             self._last_sparkline = now
 
@@ -485,20 +445,20 @@ class StatsCollector:
             "global_trt_d2h_ms": self._trt_d2h.avg_p99(),
             "global_infer_ms": global_infer,
             "global_postprocess_ms": global_pp,
-            "sparkline_latency": list(self._sparkline_latency),
-            "sparkline_throughput": list(self._sparkline_throughput),
+            "sparkline_latency": _pad(self._sparkline_latency),
+            "sparkline_throughput": _pad(self._sparkline_throughput),
             "sparkline_stages": {
-                "mcpy": list(self._sparkline_mcpy),
-                "h2d": list(self._sparkline_h2d),
-                "swait": list(self._sparkline_swait),
-                "exec": list(self._sparkline_exec),
-                "d2h": list(self._sparkline_d2h),
-                "pp": list(self._sparkline_pp),
+                "mcpy": _pad(self._sparkline_mcpy),
+                "h2d": _pad(self._sparkline_h2d),
+                "swait": _pad(self._sparkline_swait),
+                "exec": _pad(self._sparkline_exec),
+                "d2h": _pad(self._sparkline_d2h),
+                "pp": _pad(self._sparkline_pp),
             },
             "gpu": (
                 {
                     **self._gpu_poller.latest(),
-                    "sparkline": list(self._sparkline_gpu_util),
+                    "sparkline": _pad(self._sparkline_gpu_util),
                 }
                 if self._gpu_poller is not None
                 and self._gpu_poller.latest() is not None
@@ -573,36 +533,12 @@ class StatsServer:
                 snap = json.dumps(self._collector.snapshot()) + "\n"
                 conn.sendall(snap.encode())
                 self._stop.wait(1.0)
-                # Non-blocking check for config messages sent back by the TUI.
-                conn.setblocking(False)
-                try:
-                    data = conn.recv(4096)
-                    if data:
-                        self._apply_client_config(data.decode(errors="replace"))
-                except (BlockingIOError, OSError):
-                    pass
-                finally:
-                    conn.setblocking(True)
         except (BrokenPipeError, OSError):
             pass
         finally:
             try:
                 conn.close()
             except OSError:
-                pass
-
-    def _apply_client_config(self, raw: str) -> None:
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-                ws = msg.get("window_s")
-                sl = msg.get("sparkline_len")
-                if ws is not None and sl is not None:
-                    self._collector.set_window_config(float(ws), int(sl))
-            except (json.JSONDecodeError, ValueError, KeyError):
                 pass
 
 

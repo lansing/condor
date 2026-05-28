@@ -112,7 +112,7 @@ async def test_undercount_by_four_produces_leading_blanks():
         # Simulate what the buggy _update_ui provided: content_w - 4 ticks.
         buggy_n = content_w - 4
         lat_data = [float(i % 5 + 1) for i in range(buggy_n)]
-        panel.update_data(lat_data, {}, buggy_n, "")
+        panel.update_data(lat_data, {}, "")
         await pilot.pause()
 
         blanks = _count_leading_blanks(bars.render())
@@ -132,7 +132,7 @@ async def test_stacked_bar_no_leading_blanks_in_bordered_container():
         assert content_w > 0, "content width not available after layout"
 
         lat_data = [float(i % 5 + 1) for i in range(content_w)]
-        panel.update_data(lat_data, {}, content_w, "now 3.0  avg 3.0  peak 5.0")
+        panel.update_data(lat_data, {}, "now 3.0  avg 3.0  peak 5.0")
         await pilot.pause()
 
         blanks = _count_leading_blanks(bars.render())
@@ -153,7 +153,7 @@ async def test_stacked_bar_no_leading_blanks_with_stage_data():
         content_w = panel.size.width
         lat_data = [5.0] * content_w
         stages = {s: [1.0] * content_w for s in ["mcpy", "h2d", "swait", "exec", "d2h", "pp"]}
-        panel.update_data(lat_data, stages, content_w, "")
+        panel.update_data(lat_data, stages, "")
         await pilot.pause()
 
         rendered = bars.render()

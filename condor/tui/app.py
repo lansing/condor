@@ -9,7 +9,6 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.reactive import reactive
-from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -368,7 +367,6 @@ class StackedBarPanel(Widget):
 
     def __init__(self) -> None:
         super().__init__(id="latency-panel")
-        self._n: int = 60
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -380,10 +378,8 @@ class StackedBarPanel(Widget):
         self,
         lat_data: list[float],
         stages: dict[str, list[float]],
-        n: int,
         summary: str,
     ) -> None:
-        self._n = n
         self.query_one(_LatencyBars).update(lat_data, stages)
         self.query_one(".summary", Static).update(summary)
 
@@ -651,73 +647,6 @@ class LegendPanel(Static):
         return "\n".join(lines)
 
 
-class TickSelectorScreen(ModalScreen):
-    """Modal dialog for choosing seconds-per-tick."""
-
-    DEFAULT_CSS = """
-    TickSelectorScreen {
-        align: center middle;
-    }
-    #tick-dialog {
-        width: 44;
-        height: auto;
-        border: heavy $condor-border;
-        background: $condor-panel-bg;
-        padding: 1 2;
-    }
-    .dlg-title {
-        text-style: bold;
-        color: $condor-grad-high;
-        padding-bottom: 1;
-    }
-    .dlg-opt {
-        color: $condor-text;
-    }
-    .dlg-hint {
-        color: $condor-text-muted;
-        padding-top: 1;
-    }
-    """
-
-    BINDINGS = [
-        ("1", "pick_1", "1s/tick"),
-        ("2", "pick_2", "2s/tick"),
-        ("5", "pick_5", "5s/tick"),
-        ("0", "pick_10", "10s/tick"),
-        ("escape", "cancel", "Cancel"),
-    ]
-
-    def __init__(self, current: int) -> None:
-        super().__init__()
-        self._current = current
-
-    def compose(self) -> ComposeResult:
-        with Static(id="tick-dialog"):
-            yield Static("SET TICK DURATION", classes="dlg-title")
-            yield Static("  [bold]1[/bold]  →  1 second per tick", classes="dlg-opt")
-            yield Static("  [bold]2[/bold]  →  2 seconds per tick", classes="dlg-opt")
-            yield Static("  [bold]5[/bold]  →  5 seconds per tick", classes="dlg-opt")
-            yield Static("  [bold]0[/bold]  →  10 seconds per tick", classes="dlg-opt")
-            yield Static(
-                f"  [dim]current: {self._current}s/tick — ESC to cancel[/dim]",
-                classes="dlg-hint",
-            )
-
-    def action_pick_1(self) -> None:
-        self.dismiss(1)
-
-    def action_pick_2(self) -> None:
-        self.dismiss(2)
-
-    def action_pick_5(self) -> None:
-        self.dismiss(5)
-
-    def action_pick_10(self) -> None:
-        self.dismiss(10)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
 
 class AppFooter(Static):
     """Footer row: key hints + current tick rate."""
@@ -732,21 +661,17 @@ class AppFooter(Static):
     }
     """
 
-    seconds_per_tick: reactive[int] = reactive(2)
     workers_visible: reactive[bool] = reactive(False)
 
     def render(self) -> str:
         p = self.app.palette
         gh = p.gradient_high
-        spt = self.seconds_per_tick
         w_label = "GPU" if self.workers_visible else "Workers"
         return (
             f"[bold {gh}]q[/] Quit  "
-            f"[bold {gh}]t[/] Tick  "
             f"[bold {gh}]l[/] Legend  "
             f"[bold {gh}]w[/] {w_label}  "
-            f"[bold {gh}]m[/]/[bold {gh}]n[/] Theme [{p.text_muted}]{p.name}[/]  "
-            f"[{p.text_muted}]{spt}s/tick[/]"
+            f"[bold {gh}]m[/]/[bold {gh}]n[/] Theme [{p.text_muted}]{p.name}[/]"
         )
 
 
@@ -778,7 +703,6 @@ class CondorTUI(App[None]):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("ctrl+c", "quit", "Quit"),
-        ("t", "set_tick", "Set Tick"),
         ("l", "legend", "Legend"),
         ("w", "workers", "Workers"),
         ("m", "prev_theme", "Prev Theme"),
@@ -792,8 +716,6 @@ class CondorTUI(App[None]):
         self._snapshot: dict = {}
         self._layout_ready = False
         self._num_workers = 0
-        self._seconds_per_tick: int = 2
-        self._num_ticks: int = 60
         self._stats_writer: asyncio.StreamWriter | None = None
 
     @property
@@ -840,7 +762,6 @@ class CondorTUI(App[None]):
             try:
                 reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
                 self._stats_writer = writer
-                await self._send_time_config()
                 async for line in reader:
                     text = line.decode(errors="replace").strip()
                     if not text:
@@ -861,21 +782,6 @@ class CondorTUI(App[None]):
     def on_mount(self) -> None:
         self._read_stats()
 
-    async def _send_time_config(self) -> None:
-        w = self._stats_writer
-        if w is None or w.is_closing():
-            return
-        window_s = self._num_ticks * self._seconds_per_tick
-        msg = json.dumps({"window_s": window_s, "sparkline_len": self._num_ticks}) + "\n"
-        try:
-            w.write(msg.encode())
-            await w.drain()
-        except Exception:
-            pass
-
-    def action_set_tick(self) -> None:
-        self._open_tick_dialog()
-
     def action_legend(self) -> None:
         legend = self.query_one(LegendPanel)
         legend.display = not legend.display
@@ -887,14 +793,6 @@ class CondorTUI(App[None]):
         for wp in self.query(WorkerPanel):
             wp.display = show_workers
         self.query_one(AppFooter).workers_visible = show_workers
-
-    @work
-    async def _open_tick_dialog(self) -> None:
-        result = await self.push_screen_wait(TickSelectorScreen(self._seconds_per_tick))
-        if result is not None:
-            self._seconds_per_tick = result
-            self.query_one(AppFooter).seconds_per_tick = result
-            await self._send_time_config()
 
     def _update_disconnected(self) -> None:
         try:
@@ -922,25 +820,12 @@ class CondorTUI(App[None]):
         )
 
         try:
-            lat_panel = self.query_one("#latency-panel", StackedBarPanel)
-            w = lat_panel.size.width
-            if w > 0 and w != self._num_ticks:
-                self._num_ticks = w
-                await self._send_time_config()
+            n = self.query_one("#latency-panel", StackedBarPanel).size.width or 200
         except Exception:
-            pass
+            n = 200
 
-        n = self._num_ticks
-        lat_data = list(data.get("sparkline_latency", []))
-        tput_data = list(data.get("sparkline_throughput", []))
-        if len(lat_data) > n:
-            lat_data = lat_data[-n:]
-        elif len(lat_data) < n:
-            lat_data = [0.0] * (n - len(lat_data)) + lat_data
-        if len(tput_data) > n:
-            tput_data = tput_data[-n:]
-        elif len(tput_data) < n:
-            tput_data = [0.0] * (n - len(tput_data)) + tput_data
+        lat_data = list(data.get("sparkline_latency", []))[-n:]
+        tput_data = list(data.get("sparkline_throughput", []))[-n:]
 
         lat_summary = ""
         if any(v > 0 for v in lat_data):
@@ -952,17 +837,12 @@ class CondorTUI(App[None]):
             )
 
         stages_raw = data.get("sparkline_stages", {})
-        stages: dict[str, list[float]] = {}
-        for stage in STAGE_ORDER:
-            hist = list(stages_raw.get(stage, []))
-            if len(hist) > n:
-                hist = hist[-n:]
-            elif len(hist) < n:
-                hist = [0.0] * (n - len(hist)) + hist
-            stages[stage] = hist
+        stages: dict[str, list[float]] = {
+            stage: list(stages_raw.get(stage, []))[-n:] for stage in STAGE_ORDER
+        }
 
         self.query_one("#latency-panel", StackedBarPanel).update_data(
-            lat_data, stages, n, lat_summary
+            lat_data, stages, lat_summary
         )
 
         tput_summary = ""
@@ -996,11 +876,7 @@ class CondorTUI(App[None]):
 
         gpu_data = data.get("gpu")
         if gpu_data:
-            spark = list(gpu_data.get("sparkline", []))
-            if len(spark) > n:
-                spark = spark[-n:]
-            elif len(spark) < n:
-                spark = [0.0] * (n - len(spark)) + spark
+            spark = list(gpu_data.get("sparkline", []))[-n:]
             try:
                 self.query_one(GpuPanel).update_data({**gpu_data, "sparkline": spark})
             except Exception:
