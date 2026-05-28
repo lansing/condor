@@ -10,25 +10,9 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "opencv-python-headless>=4.10",
-    # Observability — API is zero-overhead when no SDK provider is configured.
-    "opentelemetry-api>=1.27",
-    "opentelemetry-sdk>=1.27",
 ]
 
 [project.optional-dependencies]
-# Lightweight local metrics: Prometheus scrape endpoint (no database needed).
-# Install with: uv sync --extra observability-local
-# Then set observability.mode: "prometheus" in config.yaml.
-observability-local = [
-    "opentelemetry-exporter-prometheus>=0.48b0",
-    "prometheus-client>=0.21",
-]
-# Full OTLP export to HyperDX, Grafana Tempo, Jaeger, etc.
-# Install with: uv sync --extra observability-otlp
-# Then set observability.mode: "otlp" in config.yaml.
-observability-otlp = [
-    "opentelemetry-exporter-otlp-proto-http>=1.27",
-]
 # Terminal metrics TUI (condor-tui command).
 # Install with: uv sync --extra tui
 tui = [

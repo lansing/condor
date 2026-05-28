@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..telemetry import tel, tracer
+from ..stats import tel
 from .base import BaseBackend, ModelInfo, SharedBackendState
 
 logger = logging.getLogger(__name__)
@@ -314,35 +314,30 @@ class TensorRTBackend(BaseBackend):
         _check(cu.cuCtxPushCurrent(self._cu_ctx), "cuCtxPushCurrent")
         try:
             t_input_copy = time.perf_counter()
-            with tracer.start_as_current_span("condor.trt.host_copy"):
-                np.copyto(self._inputs[0].host, input_tensor.ravel())
+            np.copyto(self._inputs[0].host, input_tensor.ravel())
             input_copy_ms = (time.perf_counter() - t_input_copy) * 1000
 
-            with tracer.start_as_current_span("condor.trt.h2d_copy") as h2d_span:
-                h2d_span.set_attribute("bytes_transferred", self._inputs[0]._nbytes)
-                _check(cu.cuEventRecord(self._ev_start, self._stream), "cuEventRecord:start")
-                _check(
-                    cu.cuMemcpyHtoDAsync(
-                        self._inputs[0].device,
-                        self._inputs[0]._host_ptr,
-                        self._inputs[0]._nbytes,
-                        self._stream,
-                    ),
-                    "cuMemcpyHtoDAsync",
-                )
-                _check(cu.cuEventRecord(self._ev_h2d_done, self._stream), "cuEventRecord:h2d_done")
+            _check(cu.cuEventRecord(self._ev_start, self._stream), "cuEventRecord:start")
+            _check(
+                cu.cuMemcpyHtoDAsync(
+                    self._inputs[0].device,
+                    self._inputs[0]._host_ptr,
+                    self._inputs[0]._nbytes,
+                    self._stream,
+                ),
+                "cuMemcpyHtoDAsync",
+            )
+            _check(cu.cuEventRecord(self._ev_h2d_done, self._stream), "cuEventRecord:h2d_done")
 
             if self._infer_sem is not None:
                 t_sem = time.perf_counter()
-                with tracer.start_as_current_span("condor.infer_sem.wait"):
-                    self._infer_sem.acquire()
+                self._infer_sem.acquire()
                 tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
 
             tel.inc_inference_concurrent()
             try:
                 _check(cu.cuEventRecord(self._ev_exec_start, self._stream), "cuEventRecord:exec_start")
-                with tracer.start_as_current_span("condor.trt.execute"):
-                    ok = self._context.execute_async_v3(int(self._stream))
+                ok = self._context.execute_async_v3(int(self._stream))
                 _check(cu.cuEventRecord(self._ev_exec_done, self._stream), "cuEventRecord:exec_done")
                 if not ok:
                     logger.warning("TRT execute_async_v3 returned False — output may be invalid.")
@@ -352,24 +347,22 @@ class TensorRTBackend(BaseBackend):
                 if self._infer_sem is not None:
                     self._infer_sem.release()
 
-            with tracer.start_as_current_span("condor.trt.d2h_copy"):
-                for out in self._outputs:
-                    _check(
-                        cu.cuMemcpyDtoHAsync(
-                            out._host_ptr, out.device, out._nbytes, self._stream
-                        ),
-                        "cuMemcpyDtoHAsync",
-                    )
-                _check(cu.cuEventRecord(self._ev_d2h_done, self._stream), "cuEventRecord:d2h_done")
+            for out in self._outputs:
+                _check(
+                    cu.cuMemcpyDtoHAsync(
+                        out._host_ptr, out.device, out._nbytes, self._stream
+                    ),
+                    "cuMemcpyDtoHAsync",
+                )
+            _check(cu.cuEventRecord(self._ev_d2h_done, self._stream), "cuEventRecord:d2h_done")
 
             _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize:d2h")
 
             t_output_copy = time.perf_counter()
-            with tracer.start_as_current_span("condor.trt.output_copy"):
-                outputs = [
-                    out.host.copy().reshape(shape)
-                    for out, shape in zip(self._outputs, self._model_info.output_shapes)
-                ]
+            outputs = [
+                out.host.copy().reshape(shape)
+                for out, shape in zip(self._outputs, self._model_info.output_shapes)
+            ]
             output_copy_ms = (time.perf_counter() - t_output_copy) * 1000
 
             tel.record_trt_host_copy(input_copy_ms + output_copy_ms)

@@ -9,13 +9,12 @@ import time
 import numpy as np
 import zmq
 import zmq.asyncio
-from opentelemetry.trace import StatusCode
 
 from ..config.settings import AppConfig
 from ..model_manager.manager import AsyncModelManager
 from ..model_manager.shared import SharedStateRegistry
 from ..post_process.dispatcher import DispatchedPostProcessor
-from ..telemetry import tel, tracer
+from ..stats import tel
 
 logger = logging.getLogger(__name__)
 
@@ -110,32 +109,19 @@ class AsyncZMQHandler:
             request_type = "inference"
 
         t_start = time.perf_counter()
-        with tracer.start_as_current_span("condor.request") as span:
-            span.set_attribute("worker_id", self._worker_id)
-            span.set_attribute("request_type", request_type)
-            if self.manager.active_model:
-                span.set_attribute("model_name", self.manager.active_model)
-
-            try:
-                if request_type == "model_request":
-                    result = await self._handle_model_request(header)
-                elif request_type == "model_data":
-                    data = frames[1] if len(frames) > 1 else b""
-                    result = await self._handle_model_data(header, data)
-                else:
-                    tensor_bytes = frames[1] if len(frames) > 1 else None
-                    result = await self._handle_inference(header, tensor_bytes)
-            except Exception:
-                span.set_status(StatusCode.ERROR, "unhandled dispatch error")
-                raise
+        if request_type == "model_request":
+            result = await self._handle_model_request(header)
+        elif request_type == "model_data":
+            data = frames[1] if len(frames) > 1 else b""
+            result = await self._handle_model_data(header, data)
+        else:
+            tensor_bytes = frames[1] if len(frames) > 1 else None
+            result = await self._handle_inference(header, tensor_bytes)
 
         elapsed_ms = (time.perf_counter() - t_start) * 1000
-        tel.count_request(
-            worker_id=self._worker_id, request_type=request_type, status="ok"
-        )
-        tel.record_request_duration(
-            elapsed_ms, worker_id=self._worker_id, request_type=request_type
-        )
+        tel.count_request(self._worker_id)
+        if request_type == "inference":
+            tel.record_e2e(self._worker_id, elapsed_ms)
         return result
 
     async def _handle_model_request(self, header: dict) -> list[bytes]:
@@ -194,112 +180,60 @@ class AsyncZMQHandler:
             logger.warning("Backend loaded but model_info is unavailable.")
             return _zeros_response()
 
-        model_name = self.manager.active_model or ""
-        provider = self.config.inference.provider
-
-        with tracer.start_as_current_span("condor.inference") as infer_span:
-            infer_span.set_attribute("model_name", model_name)
-            infer_span.set_attribute("provider", provider)
-            infer_span.set_attribute("worker_id", self._worker_id)
-
-            # --- dtype validation ---
-            request_dtype: str = header.get("dtype", "uint8")
-            expected_dtype: str = model_info.input_dtype
-            with tracer.start_as_current_span("condor.dtype_validation") as dv_span:
-                dv_span.set_attribute("expected_dtype", expected_dtype)
-                dv_span.set_attribute("received_dtype", request_dtype)
-                if request_dtype != expected_dtype:
-                    dv_span.set_attribute("mismatch", True)
-                    logger.error(
-                        "Input dtype mismatch: Frigate sent '%s', model expects '%s'. "
-                        "Returning zero detections.",
-                        request_dtype,
-                        expected_dtype,
-                    )
-                    tel.count_dtype_mismatch(
-                        expected=expected_dtype, received=request_dtype
-                    )
-                    return _zeros_response()
-                dv_span.set_attribute("mismatch", False)
-
-            with tracer.start_as_current_span("condor.tensor.reconstruct") as tr_span:
-                try:
-                    shape = tuple(int(d) for d in header["shape"])
-                    tr_span.set_attribute("input_bytes", len(tensor_bytes))
-                    tr_span.set_attribute("input_shape", str(shape))
-                    tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(
-                        shape
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to reconstruct input tensor from header %s.", header
-                    )
-                    return _zeros_response()
-
-            infer_span.set_attribute("input_shape", str(shape))
-            t_infer = time.perf_counter()
-            try:
-                outputs = await backend.infer(tensor)
-            except Exception:
-                logger.exception("Inference failed.")
-                tel.count_inference(
-                    worker_id=self._worker_id,
-                    model_name=model_name,
-                    provider=provider,
-                    status="error",
-                )
-                return _zeros_response()
-
-            infer_duration_ms = (time.perf_counter() - t_infer) * 1000
-            tel.record_inference_duration(
-                infer_duration_ms,
-                provider=provider,
-                model_name=model_name,
-                worker_id=self._worker_id,
+        # --- dtype validation ---
+        request_dtype: str = header.get("dtype", "uint8")
+        expected_dtype: str = model_info.input_dtype
+        if request_dtype != expected_dtype:
+            logger.error(
+                "Input dtype mismatch: Frigate sent '%s', model expects '%s'. "
+                "Returning zero detections.",
+                request_dtype,
+                expected_dtype,
             )
-            tel.count_inference(
-                worker_id=self._worker_id,
-                model_name=model_name,
-                provider=provider,
-                status="ok",
+            return _zeros_response()
+
+        try:
+            shape = tuple(int(d) for d in header["shape"])
+            tensor = np.frombuffer(tensor_bytes, dtype=request_dtype).reshape(shape)
+        except Exception:
+            logger.exception(
+                "Failed to reconstruct input tensor from header %s.", header
             )
+            return _zeros_response()
 
-            t_pp = time.perf_counter()
-            with tracer.start_as_current_span("condor.post_process") as pp_span:
-                pp_span.set_attribute(
-                    "post_processor", type(self.post_processor).__name__
-                )
-                try:
-                    if model_info.input_layout == "nhwc":
-                        input_h = int(shape[1])
-                        input_w = int(shape[2])
-                    else:
-                        input_h = int(shape[2])
-                        input_w = int(shape[3])
-                    result = await self.post_processor.process(
-                        outputs, (input_h, input_w)
-                    )
-                    num_detections = int((result[:, 1] > 0).sum())
-                    pp_span.set_attribute("detections_final", num_detections)
-                    infer_span.set_attribute("num_detections", num_detections)
+        t_infer = time.perf_counter()
+        try:
+            outputs = await backend.infer(tensor)
+        except Exception:
+            logger.exception("Inference failed.")
+            return _zeros_response()
 
-                    current_short = getattr(
-                        self.post_processor,
-                        "active_short_name",
-                        self.post_processor.short_name,
-                    )
-                    if current_short != self._last_postprocessor_short:
-                        self._last_postprocessor_short = current_short
-                        tel.set_active_postprocessor(current_short)
-                except Exception:
-                    logger.exception("Post-processing failed.")
-                    return _zeros_response()
+        tel.record_infer(self._worker_id, (time.perf_counter() - t_infer) * 1000)
+        tel.count_inference(self._worker_id)
 
-            tel.record_postprocess_duration(
-                (time.perf_counter() - t_pp) * 1000,
-                post_processor=type(self.post_processor).__name__,
-                worker_id=self._worker_id,
+        t_pp = time.perf_counter()
+        try:
+            if model_info.input_layout == "nhwc":
+                input_h = int(shape[1])
+                input_w = int(shape[2])
+            else:
+                input_h = int(shape[2])
+                input_w = int(shape[3])
+            result = await self.post_processor.process(outputs, (input_h, input_w))
+
+            current_short = getattr(
+                self.post_processor,
+                "active_short_name",
+                self.post_processor.short_name,
             )
+            if current_short != self._last_postprocessor_short:
+                self._last_postprocessor_short = current_short
+                tel.set_active_postprocessor(current_short)
+        except Exception:
+            logger.exception("Post-processing failed.")
+            return _zeros_response()
+
+        tel.record_postprocess(self._worker_id, (time.perf_counter() - t_pp) * 1000)
 
         resp_header = {"shape": list(result.shape), "dtype": "float32"}
         return [json.dumps(resp_header).encode(), result.tobytes(order="C")]

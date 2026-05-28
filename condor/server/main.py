@@ -9,8 +9,7 @@ import threading
 
 from ..config.settings import AppConfig, load_config
 from ..model_manager.shared import SharedStateRegistry
-from ..stats import StatsServer
-from ..telemetry import setup_telemetry, tel
+from ..stats import StatsServer, tel
 from .zmq_handler import AsyncZMQHandler
 
 logger = logging.getLogger(__name__)
@@ -170,16 +169,15 @@ def main() -> None:
     args = _parse_args()
     config = load_config(args.config)
     _setup_logging(config.logging.level)
-    setup_telemetry(config.observability)
 
-    tel.stats.configure(
+    tel.configure(
         provider=config.inference.provider,
         num_workers=config.server.num_workers,
         base_port=config.server.base_port,
     )
     gpu_device = int(config.inference.provider_options.get("device", 0))
-    tel.stats.configure_gpu(gpu_device)
-    stats_server = StatsServer(tel.stats)
+    tel.configure_gpu(gpu_device)
+    stats_server = StatsServer(tel)
     stats_server.start()
 
     if config.server.num_workers > 1:

@@ -604,3 +604,7 @@ class StatsServer:
                     self._collector.set_window_config(float(ws), int(sl))
             except (json.JSONDecodeError, ValueError, KeyError):
                 pass
+
+
+# Module-level singleton shared by all instrumented modules.
+tel = StatsCollector()
