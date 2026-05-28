@@ -28,8 +28,6 @@ except ImportError:
     _ILogger_base = object
 
 
-# CUDA helpers
-
 
 def _check(retval, op: str) -> None:
     """Raise RuntimeError on a non-zero CUDA result code."""
@@ -43,8 +41,6 @@ def _unwrap(retval, op: str):
     _check(retval[0], op)
     return retval[1]
 
-
-# TrtLogger
 
 class TrtLogger(_ILogger_base):
     """Bridges TensorRT log messages into Python's logging module."""
@@ -63,8 +59,6 @@ class TrtLogger(_ILogger_base):
         else:  # INTERNAL_ERROR
             logger.critical("[TRT] %s", msg)
 
-
-# HostDeviceMem
 
 
 class HostDeviceMem:
@@ -106,8 +100,6 @@ class HostDeviceMem:
         self.free()
 
 
-# Shared state dataclass
-
 
 @dataclass
 class TrtSharedState(SharedBackendState):
@@ -118,8 +110,6 @@ class TrtSharedState(SharedBackendState):
     engine: object  # trt.ICudaEngine (immutable, thread-safe)
     model_info: ModelInfo
 
-
-# Module-level helper
 
 
 def _extract_model_info(engine) -> ModelInfo:
@@ -155,9 +145,6 @@ def _extract_model_info(engine) -> ModelInfo:
     )
 
 
-# TensorRTBackend
-
-
 class TensorRTBackend(BaseBackend):
 
     def __init__(self) -> None:
@@ -177,8 +164,6 @@ class TensorRTBackend(BaseBackend):
         self._ev_exec_start = None
         self._ev_exec_done = None
         self._ev_d2h_done = None
-
-    # Shared-resource interface
 
     def load_shared_sync(self, model_path: str, config: dict) -> TrtSharedState:
         if not TRT_SUPPORT:
@@ -237,8 +222,6 @@ class TensorRTBackend(BaseBackend):
             model_info=model_info,
         )
 
-    # BaseBackend interface
-
     async def load(
         self,
         model_path: str,
@@ -260,8 +243,6 @@ class TensorRTBackend(BaseBackend):
     @property
     def model_info(self) -> ModelInfo | None:
         return self._model_info
-
-    # Synchronous helpers
 
     def _load_sync(
         self,
@@ -423,8 +404,6 @@ class TensorRTBackend(BaseBackend):
         self._engine = None
         self._cu_ctx = None
         self._model_info = None
-
-    # Private helpers
 
     def _allocate_buffers(
         self,

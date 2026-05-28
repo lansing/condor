@@ -180,7 +180,6 @@ class AsyncZMQHandler:
             logger.warning("Backend loaded but model_info is unavailable.")
             return _zeros_response()
 
-        # --- dtype validation ---
         request_dtype: str = header.get("dtype", "uint8")
         expected_dtype: str = model_info.input_dtype
         if request_dtype != expected_dtype:
