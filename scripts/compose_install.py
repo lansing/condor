@@ -218,7 +218,7 @@ class InstallContext:
     # Resolved interactively or via CLI.
     bin_dir: str              # where to install the 'condor' launcher
     frigate_config_file: Path # frigate's config.yaml to patch for detectors
-    num_workers: int = 1      # condor workers → number of zmq detector entries
+    num_workers: int = 2      # condor workers → number of zmq detector entries
 
     condor_port: int = CONDOR_ZMQ_PORT
     dry_run: bool    = False
@@ -752,7 +752,7 @@ _CONDOR_CONFIG_TEMPLATE = textwrap.dedent("""\
 
     server:
       base_port: {port}
-      num_workers: 1        # increase to match your Frigate detector count
+      num_workers: 2        # match your Frigate detector count
       models_dir: /app/models
 
     inference:
@@ -764,11 +764,6 @@ _CONDOR_CONFIG_TEMPLATE = textwrap.dedent("""\
     post_process:
       confidence_threshold: 0.5
       max_detections: 20
-
-    observability:
-      enabled: true
-      mode: tui             # stats socket only; use 'condor' command to inspect
-      service_name: condor
 """)
 
 
@@ -988,8 +983,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Directory to install the 'condor' launcher (prompted if omitted)")
     over.add_argument("--port", type=int, default=CONDOR_ZMQ_PORT, metavar="N",
                       help=f"ZMQ port (default: {CONDOR_ZMQ_PORT})")
-    over.add_argument("--num-workers", type=int, default=1, metavar="N",
-                      help="Number of condor workers / zmq detector entries (default: 1)")
+    over.add_argument("--num-workers", type=int, default=2, metavar="N",
+                      help="Number of condor workers / zmq detector entries (default: 2)")
 
     p.add_argument("--dry-run", action="store_true",
                    help="Show what would change without writing any files")

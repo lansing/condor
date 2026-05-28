@@ -87,7 +87,7 @@ port_flags = $(foreach i,$(shell seq 0 $(shell expr $(1) - 1)),-p $(shell expr $
 
 docker-build:
 	docker build \
-	  -f docker/tensorrt/Dockerfile \
+	  -f docker/Dockerfile \
 	  -t $(IMAGE_TENSORRT) \
 	  .
 
@@ -95,7 +95,7 @@ docker-build:
 docker-rebuild:
 	docker build \
 	  --no-cache \
-	  -f docker/tensorrt/Dockerfile \
+	  -f docker/Dockerfile \
 	  -t $(IMAGE_TENSORRT) \
 	  .
 
@@ -125,7 +125,7 @@ docker-test:
 
 docker-build-tensorrt-build:
 	docker build \
-	  -f docker/tensorrt/Dockerfile.build \
+	  -f docker/Dockerfile.build \
 	  -t $(IMAGE_TENSORRT_BUILD) \
 	  .
 

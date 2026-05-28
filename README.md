@@ -15,6 +15,8 @@ TensorRT sidecar for [Frigate NVR](https://frigate.video). Efficienctly runs inf
    - [Automated installer (recommended)](#automated-installer)
    - [Manual installation](#manual-installation) 
 2. [Build a TensorRT Engine from your ONNX model](#build-a-tensorrt-engine-from-your-onnx-model)
+3. Restart Frigate (use `docker compose down && docker compose up` for a full reload)
+4. Observe Condor metrics using `condor` TUI. 
 
 ## FAQ
 
@@ -52,7 +54,7 @@ I get over 90 FPS max throughput on an RTX 3050 6GB, limited to 50 watts, using 
 
 **How can I use Condor as my inference provider for Frigate?**
 
-First, [convert your ONNX model to a TensorRT Engine](#build-a-tensorrt-engine-from-your-onnx-model). Then, [configure Frigate to use Condor](#install) as a remote detector server.
+First, [convert your ONNX model to a TensorRT Engine](#build-a-tensorrt-engine-from-your-onnx-model). Then, [configure Frigate to use Condor](#install) as a remote (ZMQ) detector.
 
 If you use MDV6 model via [my exporter project](https://github.com/lansing/pytorch-wildlife-onnx) as mentioned above, you can export directly to TensorRT engine.
 
@@ -68,14 +70,19 @@ A few to mention.
 
 ---
 
+**How many ZMQ detectors (Frigate side) / workers (Condor side) should I run?**
+
+I recommend running two detectors/workers in order to max out GPU utilization and throughput. You'll still get all of TensorRT's efficiency with a single detector, but since Frigate's detector process is essentially single-threaded and synchronous, a single detector can never fully utilize any GPU (there will always be GPU idle as pre/postprocessing is done on CPU, as well as other overhead).
+
+Note that running two detectors may result in slightly increased reported detector latency metrics when GPU utilization is high, compared to a single detector scenario. However, total throughput (how many detector FPS you get out of your GPU) will be higher, which is what we care about. 
+
 **Why is TensorRT more efficient than ONNX Runtime/CUDA EP??** 
 
-Condor is essentially a server and orchestration wrapper around TensorRT, an inference runtime provided by NVIDIA. In short, TensorRT builds an engine (essentially a compiled artifact for a specific model) that has been tuned to provide the best performance for your particular hardware. A model architecture describes a computational graph, but for any given architecture there exist various low-level approaches to executing that graph on hardware. TensorRT provides numerous highly optimized building blocks, called kernels, that execute different portions of the graph defined by a model architecture. When building the engine, TensorRT experiments with various kernels and scheduling regimes to find the combination that maximizes efficiency for a given hardware platform.
+Condor is a ZMQ worker and orchestration wrapper around TensorRT. In short, TensorRT builds an engine (a compiled artifact derived from a specific ONNX or PyTorch model) that has been tuned to provide the best performance for your particular hardware. A model architecture describes a computational graph, but for any given architecture there exist numerous low-level approaches to executing that graph on hardware. TensorRT provides numerous building blocks, called kernels, that execute layers defined in the model architecture such that compute is better utilized compared to a more generic approach. Among other things, the implementation of fused layer kernels can greatly improve compute efficiency in many models. When building the engine, TensorRT experiments with various kernel implementations, layer fusion approaches, and scheduling regimes to find the combination that maximizes efficiency for a given hardware platform.
 
 ONNX Runtime, with its CUDA EP, also executes your model using efficient kernels, but the scope of optimization is less aggressive compared to TensorRT. 
 
-Condor also has improved efficiency on the CPU side of things by running multiple inference threads in a single process while synchronizing the GPU utilization (i.e. only one thread is waiting on GPU at a time, meanwhile the others can transfer data between host and device, post-process the model output, communicate with frigate etc). This results in very high GPU utilization and maximum FPS with minimum resources on the host side. You can expect to max out any GPU with about ~1 CPU core utilized, and about a half gig of host memory.
-
+Condor also has improved efficiency on the CPU side of things by running multiple inference threads in a single process while synchronizing the GPU utilization (i.e. only one thread is waiting on GPU at a time, meanwhile the others can transfer data between host and device, post-process the model output, communicate with frigate etc). This results in very high GPU utilization and maximum FPS with minimum resources on the host side. You can expect to max out any GPU with about ~1 CPU core utilized, and about a half gig of host memory. Frigate's ONNX detector requires using multiple detector processes in order to max out GPU utilization, each of which comes with over a gig memory footprint. 
 ---
 
 ## Automated installer

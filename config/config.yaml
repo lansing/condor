@@ -7,7 +7,7 @@ server:
   # Number of independent worker threads, each with its own ZMQ REP socket.
   # Each worker binds to base_port + i so Frigate can be configured with N
   # separate detector entries pointing to consecutive ports.
-  num_workers: 2       # default: 1 (single-worker, uses endpoint above)
+  num_workers: 2
   base_port: 5555      # workers bind to base_port, base_port+1, ..., base_port+N-1
 
 inference:

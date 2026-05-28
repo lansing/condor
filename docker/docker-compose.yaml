@@ -16,8 +16,8 @@ services:
     condor:
         image: condor:tensorrt
         build:
-            context: ../..
-            dockerfile: docker/tensorrt/Dockerfile
+            context: ..
+            dockerfile: Dockerfile
         restart: "no"
         runtime: nvidia
         ports:

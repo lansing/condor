@@ -71,7 +71,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/tensorrt/Dockerfile
+          file: docker/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
@@ -131,7 +131,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/tensorrt/Dockerfile
+          file: docker/Dockerfile
           push: true
           tags: ghcr.io/${{ github.repository }}:${{ steps.pr.outputs.short }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
