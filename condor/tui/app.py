@@ -11,7 +11,7 @@ from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Sparkline, Static
+from textual.widgets import Static
 
 from ..stats import SOCKET_PATH as _DEFAULT_SOCKET_PATH
 from .art import _trunc, _vis
@@ -143,6 +143,72 @@ def _render_bar_row(row: list[str]) -> str:
             parts.append(" " * span)
         i = j
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Gradient bar chart (throughput / GPU utilization)
+# ---------------------------------------------------------------------------
+
+
+class _GradientBars(Static):
+    """Vertical bar chart where each row is coloured by its height fraction.
+
+    Bottom row → palette.gradient_low, top row → palette.gradient_high.
+    The caller supplies the normalisation peak so throughput and GPU can each
+    use their own scale (session-max and 100.0 respectively).
+    """
+
+    DEFAULT_CSS = """
+    _GradientBars { width: 1fr; height: 1fr; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("")
+        self._data: list[float] = []
+        self._peak: float = 0.0
+
+    def update(self, data: list[float], peak: float) -> None:
+        self._data = data
+        self._peak = peak
+        self.refresh()
+
+    def render(self) -> str:  # type: ignore[override]
+        data = self._data
+        peak = self._peak
+        bar_h = max(1, self.size.height)
+        bar_w = max(1, self.size.width)
+
+        if not data or peak <= 0:
+            row: list[str] = [_BASELINE_COLOR] * bar_w
+            return _render_bar_row(row)
+
+        p = self.app.palette
+        # Precompute one gradient colour per row (bottom=low, top=high).
+        row_colors = [
+            p.gradient_color((bar_h - 1 - r) / max(bar_h - 1, 1))
+            for r in range(bar_h)
+        ]
+
+        n_cols = min(bar_w, len(data))
+        offset = len(data) - n_cols
+        n_blank = bar_w - n_cols
+
+        grid: list[list[str]] = [[""] * bar_w for _ in range(bar_h)]
+        for col in range(n_blank):
+            grid[bar_h - 1][col] = _BASELINE_COLOR
+
+        for col_idx in range(n_cols):
+            col = n_blank + col_idx
+            val = data[offset + col_idx]
+            if val <= 0:
+                grid[bar_h - 1][col] = _BASELINE_COLOR
+                continue
+            bar_total = max(1, min(bar_h, round(val / peak * bar_h)))
+            start_row = bar_h - bar_total
+            for row_idx in range(start_row, bar_h):
+                grid[row_idx][col] = row_colors[row_idx]
+
+        return "\n".join(_render_bar_row(row) for row in grid)
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +389,7 @@ class StackedBarPanel(Widget):
 
 
 class GraphPanel(Widget):
-    """Labeled sparkline panel with a live max y-scale label."""
+    """Labeled gradient-bar panel with a live max y-scale label."""
 
     DEFAULT_CSS = """
     GraphPanel {
@@ -337,18 +403,9 @@ class GraphPanel(Widget):
         color: $condor-text;
         text-style: bold;
     }
-    GraphPanel > Sparkline {
-        height: 1fr;
-    }
     GraphPanel > .summary {
         height: 1;
         color: $condor-text-muted;
-    }
-    #throughput-panel-spark > .sparkline--max-color {
-        color: $condor-grad-high;
-    }
-    #throughput-panel-spark > .sparkline--min-color {
-        color: $condor-grad-low;
     }
     """
 
@@ -357,23 +414,24 @@ class GraphPanel(Widget):
         self._title = title
         self._unit = unit
         self._title_id = f"{widget_id}-title"
-        self._spark_id = f"{widget_id}-spark"
         self._summary_id = f"{widget_id}-summary"
+        self._session_peak: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Static(f" ▶ {self._title}", id=self._title_id, classes="title")
-        yield Sparkline([], id=self._spark_id, summary_function=max)
+        yield _GradientBars()
         yield Static("", id=self._summary_id, classes="summary")
 
     def update_data(self, data: list[float], summary: str) -> None:
         if not data:
             return
-        peak = max(data)
+        window_peak = max(data)
+        self._session_peak = max(self._session_peak, window_peak)
         gh = self.app.palette.gradient_high
         self.query_one(f"#{self._title_id}", Static).update(
-            f" [bold white]▶ {self._title}[/]  [{gh}]↑ {peak:.0f}[/]"
+            f" [bold white]▶ {self._title}[/]  [{gh}]↑ {window_peak:.0f}[/]"
         )
-        self.query_one(f"#{self._spark_id}", Sparkline).data = data
+        self.query_one(_GradientBars).update(data, self._session_peak)
         self.query_one(f"#{self._summary_id}", Static).update(summary)
 
 
@@ -509,9 +567,6 @@ class GpuPanel(Widget):
         color: $condor-text;
         text-style: bold;
     }
-    GpuPanel > #gpu-spark {
-        height: 1fr;
-    }
     GpuPanel > .gpu-summary {
         height: 1;
         color: $condor-text-muted;
@@ -520,17 +575,11 @@ class GpuPanel(Widget):
         height: 1;
         color: $condor-text-muted;
     }
-    #gpu-spark > .sparkline--max-color {
-        color: $condor-grad-high;
-    }
-    #gpu-spark > .sparkline--min-color {
-        color: $condor-grad-low;
-    }
     """
 
     def compose(self) -> ComposeResult:
         yield Static("GPU  —", classes="gpu-header")
-        yield Sparkline([], id="gpu-spark", summary_function=max)
+        yield _GradientBars()
         yield Static("", classes="gpu-summary")
         yield Static("", classes="gpu-power")
 
@@ -550,7 +599,7 @@ class GpuPanel(Widget):
         self.query_one(".gpu-header", Static).update(
             f"[bold white]GPU {index}[/]  [dim]{name}[/dim]  [{temp_color}]{temp_c}°C[/]"
         )
-        self.query_one("#gpu-spark", Sparkline).data = sparkline_data
+        self.query_one(_GradientBars).update(sparkline_data, 100.0)
 
         nonzero = [v for v in sparkline_data if v > 0]
         summary = (
