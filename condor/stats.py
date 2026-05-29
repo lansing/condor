@@ -20,7 +20,6 @@ _SPARKLINE_TICK_S = 2.0  # fixed tick interval — one sparkline point every 2 s
 
 
 def _pad(dq: collections.deque) -> list[float]:
-    """Zero-pad to maxlen so the TUI always receives a full-length array."""
     deficit = (dq.maxlen or 0) - len(dq)
     return [0.0] * deficit + list(dq)
 
@@ -96,9 +95,6 @@ class _RollingWindow:
         p99 = round(sorted_vals[p99_idx], 2)
         return {"avg": avg, "p99": p99}
 
-    def set_window(self, window_s: float) -> None:
-        with self._lock:
-            self._window_s = window_s
 
 
 class GpuPoller:
@@ -208,7 +204,7 @@ class StatsCollector:
         self._start = time.monotonic()
 
         self._workers_active = 0
-        self._inference_concurrent = 0
+
         self._active_model = ""
         self._active_postprocessor = ""
 
@@ -298,14 +294,6 @@ class StatsCollector:
         with self._lock:
             self._workers_active = max(0, self._workers_active - 1)
 
-    def inc_inference_concurrent(self) -> None:
-        with self._lock:
-            self._inference_concurrent += 1
-
-    def dec_inference_concurrent(self) -> None:
-        with self._lock:
-            self._inference_concurrent = max(0, self._inference_concurrent - 1)
-
     def count_request(self, worker_id: int) -> None:
         w = self._get_worker(worker_id)
         with self._lock:
@@ -344,7 +332,8 @@ class StatsCollector:
     def _maybe_update_sparklines(self) -> None:
         now = time.monotonic()
         with self._sparkline_lock:
-            if now - self._last_sparkline < 2.0:
+            elapsed = now - self._last_sparkline
+            if elapsed < 2.0:
                 return
             self._last_sparkline = now
 
@@ -411,7 +400,6 @@ class StatsCollector:
             active_model = self._active_model
             active_postprocessor = self._active_postprocessor
             workers_active = self._workers_active
-            inference_concurrent = self._inference_concurrent
             uptime = now - self._start
 
         def _agg(stats_list: list[dict]) -> dict[str, float]:
@@ -432,7 +420,6 @@ class StatsCollector:
             "config": cfg,
             "uptime_s": round(uptime, 1),
             "active_workers": workers_active,
-            "inference_concurrent": inference_concurrent,
             "active_model": active_model,
             "active_postprocessor": active_postprocessor,
             "workers": workers_snap,

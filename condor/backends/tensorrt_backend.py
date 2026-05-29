@@ -315,7 +315,6 @@ class TensorRTBackend(BaseBackend):
                 self._infer_sem.acquire()
                 tel.record_sem_wait((time.perf_counter() - t_sem) * 1000)
 
-            tel.inc_inference_concurrent()
             try:
                 _check(cu.cuEventRecord(self._ev_exec_start, self._stream), "cuEventRecord:exec_start")
                 ok = self._context.execute_async_v3(int(self._stream))
@@ -324,7 +323,6 @@ class TensorRTBackend(BaseBackend):
                     logger.warning("TRT execute_async_v3 returned False — output may be invalid.")
                 _check(cu.cuStreamSynchronize(self._stream), "cuStreamSynchronize:exec")
             finally:
-                tel.dec_inference_concurrent()
                 if self._infer_sem is not None:
                     self._infer_sem.release()
 

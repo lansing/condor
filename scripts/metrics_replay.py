@@ -41,14 +41,6 @@ def _client(conn: socket.socket, frames: list[bytes], stop: threading.Event) -> 
             conn.sendall(frames[idx % len(frames)])
             idx += 1
             stop.wait(1.0)
-            # Drain any config messages sent by the TUI (window_s / sparkline_len).
-            conn.setblocking(False)
-            try:
-                conn.recv(4096)
-            except (BlockingIOError, OSError):
-                pass
-            finally:
-                conn.setblocking(True)
     except (BrokenPipeError, OSError):
         pass
     finally:

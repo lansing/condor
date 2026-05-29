@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 from pathlib import Path
 
 from textual import work
@@ -21,7 +22,6 @@ _THEME_FILE = Path(SOCKET_PATH).parent / "condor-theme"
 
 
 def _load_saved_theme(names: list[str]) -> tuple[int, Palette]:
-    """Return (index, palette) from the saved theme file, or Broica as default."""
     try:
         name = _THEME_FILE.read_text().strip()
         if name in names:
@@ -38,14 +38,6 @@ def _save_theme(name: str) -> None:
     except OSError:
         pass
 
-STAGE_LABELS: dict[str, str] = {
-    "mcpy": "Host memory copy",
-    "h2d": "Host → Device (H2D)",
-    "swait": "GPU queue wait",
-    "exec": "TRT engine execute",
-    "d2h": "Device → Host (D2H)",
-    "pp": "Post-process",
-}
 STAGE_ABBREV: dict[str, str] = {
     "mcpy": "MCpy",
     "h2d": "H2D",
@@ -72,7 +64,6 @@ def _fmt_ms_row(d: dict) -> str:
 
 
 def _alloc_rows(vals: dict[str, float], bar_h: int) -> dict[str, int]:
-    """Allocate bar_h rows to stages proportionally (descending-first greedy)."""
     D = sum(vals.values())
     if D == 0 or bar_h == 0:
         return {s: 0 for s in vals}
@@ -123,7 +114,6 @@ def _build_column(
 
 
 def _render_bar_row(row: list[str]) -> str:
-    """Convert a list of colour strings to a Rich-markup line of block chars."""
     if not row:
         return ""
     parts: list[str] = []
@@ -150,12 +140,6 @@ def _render_bar_row(row: list[str]) -> str:
 
 
 class _GradientBars(Static):
-    """Vertical bar chart where each row is coloured by its height fraction.
-
-    Bottom row → palette.gradient_low, top row → palette.gradient_high.
-    The caller supplies the normalisation peak so throughput and GPU can each
-    use their own scale (session-max and 100.0 respectively).
-    """
 
     DEFAULT_CSS = """
     _GradientBars { width: 1fr; height: 1fr; }
@@ -230,7 +214,6 @@ class StatusBanner(Static):
     def __init__(self) -> None:
         super().__init__()
         self._uptime = 0.0
-        self._workers_active = 0
         self._num_workers = 0
         self._model = ""
         self._postprocessor = ""
@@ -245,7 +228,6 @@ class StatusBanner(Static):
         postprocessor: str = "",
     ) -> None:
         self._uptime = uptime
-        self._workers_active = workers_active
         self._num_workers = num_workers
         self._model = model
         self._postprocessor = postprocessor
@@ -432,8 +414,6 @@ class GraphPanel(Widget):
 
 
 class WorkerPanel(Static):
-    """Displays stats for one worker thread."""
-
     DEFAULT_CSS = """
     WorkerPanel {
         width: 1fr;
@@ -713,10 +693,8 @@ class CondorTUI(App[None]):
         self._palette_names: list[str] = available_palettes()
         self._palette_idx, self._palette = _load_saved_theme(self._palette_names)
         super().__init__()
-        self._snapshot: dict = {}
         self._layout_ready = False
         self._num_workers = 0
-        self._stats_writer: asyncio.StreamWriter | None = None
 
     @property
     def palette(self) -> Palette:
@@ -761,7 +739,6 @@ class CondorTUI(App[None]):
         while True:
             try:
                 reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
-                self._stats_writer = writer
                 async for line in reader:
                     text = line.decode(errors="replace").strip()
                     if not text:
@@ -774,12 +751,14 @@ class CondorTUI(App[None]):
                 writer.close()
             except (ConnectionRefusedError, FileNotFoundError, OSError):
                 pass
-            finally:
-                self._stats_writer = None
             self._update_disconnected()
             await asyncio.sleep(2.0)
 
     def on_mount(self) -> None:
+        try:
+            asyncio.get_event_loop().add_signal_handler(signal.SIGHUP, self.exit)
+        except (OSError, NotImplementedError):
+            pass
         self._read_stats()
 
     def action_legend(self) -> None:
@@ -801,7 +780,6 @@ class CondorTUI(App[None]):
             pass
 
     async def _update_ui(self, data: dict) -> None:
-        self._snapshot = data
         cfg = data.get("config", {})
         num_workers = cfg.get("num_workers", 1)
         base_port = cfg.get("base_port", 5555)

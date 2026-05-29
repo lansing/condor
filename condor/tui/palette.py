@@ -11,7 +11,6 @@ _PALETTES_DIR = Path(__file__).parent / "palettes"
 
 
 def _dp_to_hex(line: str) -> str:
-    """Convert a 16-bit NsCDE .dp color line '#RRRRGGGGBBBB' → '#rrggbb'."""
     s = line.strip().lstrip("#")
     return f"#{int(s[0:4], 16) >> 8:02x}{int(s[4:8], 16) >> 8:02x}{int(s[8:12], 16) >> 8:02x}"
 
@@ -63,7 +62,6 @@ class Palette:
         return f"#{r:02x}{g:02x}{b:02x}"
 
     def css_variables(self) -> dict[str, str]:
-        """Inject palette colors as Textual CSS variables ($condor-*)."""
         return {
             "condor-border": self.border,
             "condor-bg": self.background,
@@ -77,8 +75,7 @@ class Palette:
 
     @classmethod
     def from_dp(cls, path: Path) -> "Palette":
-        """Parse an NsCDE .dp file and derive TUI roles from its 8 slots.
-
+        """
         Slot → role mapping:
           0 → gradient high anchor
           1 → (unused — original CDE inactive border)
