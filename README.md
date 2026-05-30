@@ -11,12 +11,9 @@ TensorRT sidecar for [Frigate NVR](https://frigate.video). Efficienctly runs inf
 
 ## Install
 
-1. [Install](#install)
-   - [Automated installer (recommended)](#automated-installer)
-   - [Manual installation](#manual-installation) 
-2. [Build a TensorRT Engine from your ONNX model](#build-a-tensorrt-engine-from-your-onnx-model)
-3. Restart Frigate (use `docker compose down && docker compose up` for a full reload)
-4. Observe Condor metrics using `condor` TUI. 
+1. Run the [installer](#automated-installer) — converts your ONNX model to a TensorRT engine and wires condor into your Frigate stack
+2. Restart Frigate (`docker compose down && docker compose up -d`)
+3. Observe Condor metrics using the `condor` TUI
 
 ## FAQ
 
@@ -89,24 +86,25 @@ Condor also has improved efficiency on the CPU side of things by running multipl
 
 Run the installer from your Frigate project root (the directory containing your `docker-compose.yml`). It will:
 
-1. Add the `condor` service to `docker-compose.yml`
-2. Write a starter `condor/config.yaml` into your Frigate config directory
-3. Install a `condor` shell command that opens the TUI inside the running container
-4. Add `zmq` detector entries to your Frigate `config.yaml`
+1. Convert your ONNX model to a TensorRT engine (takes a few minutes)
+2. Add the `condor` service to `docker-compose.yml`
+3. Write a starter `condor/config.yaml` into your Frigate config directory
+4. Install a `condor` shell command that opens the TUI inside the running container
+5. Swap out your existing detector config for condor ZMQ detectors and update `model.path`
 
 All modified files are backed up (`.bak`) before being changed.
 
 **Run The Install Script**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py \
+curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/install.py \
     -o /tmp/condor_install.py && python3 /tmp/condor_install.py
 ```
 
 **Same, with uv:**
 
 ```bash
-uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_install.py
+uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/install.py
 ```
 
 ### Installer Options
@@ -114,11 +112,19 @@ uv run https://raw.githubusercontent.com/lansing/condor/master/scripts/compose_i
 For a typical install you probably don't need to specify any of these, but in case you do:
 
 ```
+--convert-only           Only convert the ONNX model; skip condor install (useful if you have
+                         multiple models to convert before committing to one)
+--no-convert             Skip conversion — use if you already have a .engine file
+--onnx PATH              ONNX file to convert (auto-detected from Frigate config if omitted)
+--device N               CUDA device index for engine build and condor inference (default: 0)
+                         If you have multiple GPUs, the installer will tell you which one it
+                         picked and kindly suggest you use --device if it guessed wrong.
+--no-fp16                Build an FP32 engine instead of FP16
 --frigate-service NAME   Compose service name for Frigate
 --models-dir PATH        Host path for model files
 --bin-dir PATH           Directory to install the 'condor' launcher
 --port N                 ZMQ base port (default: 5555)
---num-workers N          Number of condor workers (default: 1)
+--num-workers N          Number of condor workers (default: 2)
 ```
 
 Other flags: `--dry-run`, `-y/--yes`
@@ -288,46 +294,31 @@ docker compose exec condor condor-tui
 
 ## Build a TensorRT engine from your ONNX model
 
-condor requires a TensorRT `.engine` file, and it cannot serve ONNX models directly.
+The [automated installer](#automated-installer) handles this for you. If you want to convert a model separately (e.g. you have several to try), use `--convert-only`:
 
->If you're looking for a first model to test Condor with, I recommend using [pytorch-wildlife-onnx](https://github.com/lansing/pytorch-wildlife-onnx) to export a MegaDetector V6 YOLOv10 model into TensorRT `.engine` format. This is what I use with Condor.
-
-We offer some scripts below to convert an ONNX model using NVIDIA's TensorRT base image. The builder image is only needed once, when you convert your model. This size of this image (10+ GB) is one reason we don't include this functionality in Condor.
-
-Once you have an engine file, update your Frigate `config.yaml` to reference it by filename. If you previously pointed Frigate at an ONNX file, change the extension:
-
-```yaml
-model:
-  path: /models/your-model.engine  # was: your-model.onnx
+```bash
+curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/install.py \
+    | python3 - --convert-only --onnx models/your-model.onnx
 ```
+
+Then run the installer again without `--convert-only` to finish the setup. It'll find the `.engine` automatically.
+
+> Already have a `.engine` file (e.g. from [pytorch-wildlife-onnx](https://github.com/lansing/pytorch-wildlife-onnx))? Drop it in your models directory and run the installer with `--no-convert`. Done.
 
 ### TensorRT version compatibility
 
-A `.engine` file is compiled for a specific TensorRT version and GPU architecture. Generally speaking, it cannot be loaded by a different version of TensorRT, and it may not be portable between GPU generations. **Build your engine on the same machine that will run condor.**
+A `.engine` file is compiled for a specific TensorRT version and GPU architecture — it cannot be loaded by a different TensorRT version, and it may not be portable between GPU generations. **Build your engine on the same machine that will run condor.**
 
-As of this release, Condor uses **TensorRT 26.01** and `.engine` files must be built using this version of TensorRT, to be used with Condor.
+As of this release, Condor uses **TensorRT 26.01** and `.engine` files must be built using this version, which the installer handles automatically.
 
-### Convert an ONNX model
+### Re-converting after a condor upgrade
 
-To simplify matters slightly, we provide the following `onnx2engine.sh` script. This script will examine the currently installed Condor container image to ensure the right TensorRT builder image is used, and the convert the specified ONNX model to TRT engine.
-
-Run the following (condor must be installed and its image present locally), replacing the model path appropriately:
+If you upgrade condor and the TRT version changes, use `onnx2engine.sh` to rebuild:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2engine.sh \
     | bash -s -- models/your-model.onnx
 ```
-
-This produces `models/your-model.engine` alongside the ONNX file. To specify a different output path:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2engine.sh \
-    | bash -s -- models/your-model.onnx models/your-model.engine
-```
-
-Options:
-- `--no-fp16`: build an FP32 engine (FP16 is the default and recommended for most GPUs)
-- `--` followed by any arguments: passed directly to `trtexec` (e.g. for dynamic shapes)
 
 ## AI Use Disclosure
 
