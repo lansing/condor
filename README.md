@@ -1,6 +1,6 @@
 # condor
 
-TensorRT sidecar for [Frigate NVR](https://frigate.video). Efficienctly runs inference on a dedicated NVIDIA GPU and exposes it to Frigate via the ZMQ remote detector protocol. Provides significantly better FPS throughput and GPU utilization, with less CPU and host memory usage, compared to Frigate's built-in ONNX Runtime detector.
+TensorRT sidecar for [Frigate NVR](https://frigate.video). Efficiently runs inference on a dedicated NVIDIA GPU and exposes it to Frigate via the ZMQ remote detector protocol. Provides significantly better FPS throughput and GPU utilization, with less CPU and host memory usage, compared to Frigate's built-in ONNX Runtime detector.
 
 ## Performance Observations
 
@@ -9,12 +9,12 @@ Inference against [MegaDetector V6](https://github.com/microsoft/megadetector) m
 | Model | GPU | ONNX fp16 | Condor fp16 | Condor int8 | Speedup |
 |-------|-----|-----------------|-------------|-------------|---------|
 | YOLOv9-e | 2080 Ti | 64 FPS | 125 FPS | — | 2.0× |
-| YOLOv10-e | 2080 Ti | 77 FPS | 171 FPS | 226 FPS | 2.2× → **2.9×** |
+| YOLOv10-e | 2080 Ti | 77 FPS | 171 FPS | 226 FPS | 2.2× → 2.9× |
 | YOLOv9-e | A400 | 12 FPS | 22 FPS | — | 1.8× |
-| YOLOv10-e | A400 | 18 FPS | 31 FPS | 42 FPS | 1.7× → **2.3×** |
+| YOLOv10-e | A400 | 18 FPS | 31 FPS | 42 FPS | 1.7× → 2.3× |
 
 
-We used a consistent configuration of 2x Frigate detectors (ONNX or ZMQ) for both ONNX and Condor; Condor was correspondinglyt configured to use 2 workers. int8 model was not tested with ONNX due to poor support for quantized kernels in ONNX CUDA provider (throughput is much worse vs fp16). Host CPU was an 8700k.
+Configuration: 2x Frigate detectors (ONNX or ZMQ) for both ONNX and Condor; 2x Condor workers. int8 model was not tested with ONNX due to poor support for quantized kernels in ONNX CUDA provider (throughput is much worse vs fp16). Host CPU was an 8700k.
 
 
 ## Requirements
@@ -34,7 +34,7 @@ We used a consistent configuration of 2x Frigate detectors (ONNX or ZMQ) for bot
 
 **Why would I use this instead of Frigate's built in detector?**
 
-Condor provides an optimized, TensorRT-backed inference runtime with significantly better efficiency and throughput compared to what Frigate offers out of the box via its ONNX Runtime (CUDA EP) backend. For mid-range GPUs, expect to see 1.5-2x throughput compared to ONNX Runtime with CUDA EP. 
+For Frigate users with NVIDIA GPus, Condor provides significantly better efficiency and throughput compared to what Frigate offers out of the box via its ONNX Runtime (CUDA EP) backend. Expect to see 1.5-2.5x throughput compared to ONNX Runtime with CUDA EP, depending on model and your setup.
 
 Condor has a lower host memory footprint (500-600 MB compared to 1+ GB for ONNX Runtime for single detector), better efficiency on the CPU side, and lower VRAM footprint (10-20% lower than ONNX for single detector, > 50% lower compared to multiple ONNX detectors).
 
@@ -42,13 +42,13 @@ Condor has a lower host memory footprint (500-600 MB compared to 1+ GB for ONNX 
 
 **What GPUs are supported?**
 
-NVIDIA GPUs from Turing (RTX 20 series) onward.
+NVIDIA GPUs, Turing (RTX 20 series) onward, i.e. anything released since late 2018.
 
 ---
 
 **What detector model architectures are supported?**
 
-YOLOv9 and YOLOv10 are currently supported. Most likely, earlier YOLO variants would also work, as (AFAIK) their tensor input/output formats are compatible with YOLOv9.
+YOLOv9 and YOLOv10 are currently supported. Most likely, some earlier YOLO variants would also work, as their tensor input/output formats are typically compatible with YOLOv9.
  
 If you'd like to see another architecture supported, please reach out.
 
@@ -56,11 +56,11 @@ If you'd like to see another architecture supported, please reach out.
 
 **What model should I use with Condor?**
 
-I recommend MegaDetector V6 in YOLOv10. This model provides excellent performance for a typical Frigate home setup. 
+I recommend MegaDetector V6, YOLOv10 variant. This model provides excellent performance for a typical Frigate home setup. 
 
 > Check out [pytorch-wildlife-onnx](https://github.com/lansing/pytorch-wildlife-onnx) for an easy way to export TensorRT (or ONNX) artifacts of this model. 
 
-I get over 90 FPS max throughput on an RTX 3050 6GB, limited to 50 watts, using MegaDetector V6, YOLOv10 Extra, 640x640, int8 quantization, exported using pytorch-wildlife-onnx.
+My house setup is an RTX 3050 6GB, limited to 50 watts, using MegaDetector V6, YOLOv10 Extra, 640x640, int8 quantization, exported using pytorch-wildlife-onnx. My host CPU is 8500T (Lenovo M720Q Tiny). I get 90 FPS, which is sufficient for my 8 camera setup.
 
 ---
 
@@ -76,7 +76,7 @@ If you use MDV6 model via [my exporter project](https://github.com/lansing/pytor
 
 A few to mention.
 
-* YOLOv10 support: as of writing, Frigate does not support YOLOv10, but Condor does.
+* YOLOv10 support: as of writing, Frigate's built in detector does not support YOLOv10, but Condor does.
 * int8 model support: ONNX Runtime CUDA EP has weak support for int8 quantized models. Condor can run quantized TRT engines without issue.
 * TUI with fine-graned metrics across the inference lifecycle per frame.
 
@@ -84,7 +84,7 @@ A few to mention.
 
 **How many ZMQ detectors (Frigate side) / workers (Condor side) should I run?**
 
-I recommend running two detectors/workers in order to max out GPU utilization and throughput. You'll still get all of TensorRT's efficiency with a single detector, but since Frigate's detector process is essentially single-threaded and synchronous, a single detector can never fully utilize any GPU (there will always be GPU idle as pre/postprocessing is done on CPU, as well as other overhead).
+I recommend running two detectors/workers in order to max out GPU utilization and throughput. You'll still get all of TensorRT's efficiency with a single detector, but since Frigate's detector loop is single-threaded and synchronous, a single detector can never fully utilize any GPU (there will always be GPU idle as pre/postprocessing is done on CPU, as well as other overhead).
 
 Note that running two detectors may result in slightly increased reported detector latency metrics when GPU utilization is high, compared to a single detector scenario. However, total throughput (how many detector FPS you get out of your GPU) will be higher, which is what we care about. 
 
@@ -339,4 +339,4 @@ curl -fsSL https://raw.githubusercontent.com/lansing/condor/master/scripts/onnx2
 
 ## AI Use Disclosure
 
-Much of the code in this project was written using AI assistance. In particular, the TUI, ZMQ handler and installer utilities were essentially "vibe coded". The core inference orchestration (`tensorrt_backend.py`) was prototyped using AI assistance, then rewritten and optimized by hand. This README was written by a human.
+Some of the code in this project was written using AI assistance. In particular, the TUI and the installer utilities were essentially "vibe coded". The core inference orchestration (`tensorrt_backend.py` etc) was prototyped using AI assistance, then rewritten and optimized by hand. This README was written by a human.
